@@ -1,0 +1,22 @@
+{
+  "name": "ponos-ts",
+  "version": "0.0.0",
+  "description": "Typescript port of Ponos",
+  "scripts": {
+    "build-ts": "tsc",
+    "style": "tslint -c tslint.json 'src/**/*.ts'",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "Bryan Kendall <bryan@bryankendall.com>",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/amqplib": "^0.5.6",
+    "@types/bluebird": "^3.5.20",
+    "tslint": "^5.9.1",
+    "typescript": "^2.7.1"
+  },
+  "dependencies": {
+    "amqplib": "^0.5.2",
+    "bluebird": "^3.5.1"
+  }
+}
