@@ -6,7 +6,8 @@
     "build-ts": "tsc",
     "style": "tslint -c tslint.json 'src/**/*.ts'",
     "test": "mocha -r ts-node/register test/**/*.ts",
-    "test-all": "npm run style && npm run build-ts && npm run test"
+    "test-all": "npm run style && npm run build-ts && npm run test",
+    "watch-ts": "tsc --watch"
   },
   "author": "Bryan Kendall <bryan@bryankendall.com>",
   "license": "MIT",
