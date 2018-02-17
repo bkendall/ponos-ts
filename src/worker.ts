@@ -6,7 +6,7 @@ export interface WorkerData {
 
 export class PonosWorker {
   attempt: number;
-  job: WorkerData
+  job: WorkerData;
   msTimeout: number;
   queue: string;
   task: (data: WorkerData) => void;
