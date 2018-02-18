@@ -4,6 +4,8 @@ export interface WorkerData {
   message: string;
 }
 
+export type WorkerFunction = (data: WorkerData) => Promise<any>;
+
 export class PonosWorker {
   attempt: number;
   job: WorkerData;
@@ -69,6 +71,7 @@ export class PonosWorker {
   }
 
   private handleTaskSuccess() {
-    console.log('success');
+    // TODO(bkendall): do something more useful here.
+    // console.log('success');
   }
 }
