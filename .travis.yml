@@ -2,6 +2,10 @@ language: node_js
 node_js:
 - 'node'
 - '8'
+env:
+  global:
+  - RABBITMQ_USERNAME=guest
+  - RABBITMQ_PASSWORD=guest
 before_install:
 - npm install -g greenkeeper-lockfile
 before_script:
@@ -10,6 +14,7 @@ script:
 - npm run style
 - npm run build-ts
 - npm run test
+- npm run test-functional
 after_script:
 - greenkeeper-lockfile-upload
 env:
