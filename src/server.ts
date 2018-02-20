@@ -1,9 +1,8 @@
 import * as Promise from 'bluebird';
 import {RabbitMQ} from './rabbitmq';
-import {PonosWorker, WorkerData} from './worker';
+import {PonosWorker, WorkerData, WorkerFunction} from './worker';
 
-export {WorkerData};
-export type WorkerFunction = (data: WorkerData) => Promise<any>;
+export {WorkerData, WorkerFunction};
 
 export class Server {
   // private events: Map<string, Function>;
