@@ -7,6 +7,7 @@
     "style": "tslint -c tslint.json 'src/**/*.ts'",
     "test": "mocha $npm_package_options_mocha test/**/*.ts",
     "test-all": "npm run style && npm run build-ts && npm run test",
+    "test-functional": "mocha $npm_package_options_mocha test-functional/**/*.ts",
     "watch-test": "mocha $npm_package_options_mocha -w --watch-extensions ts test/**/*.ts",
     "watch-ts": "tsc --watch"
   },
