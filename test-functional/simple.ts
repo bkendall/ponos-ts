@@ -19,13 +19,17 @@ describe('Simple Example', () => {
   before(() => {
     rabbitmq = new RabbitMQ({
       name: 'ponos',
+      tasks: new Set([
+        'basic-queue-worker',
+      ]),
     });
     return rabbitmq.connect();
   });
 
   it('should call our basic worker', () => {
-    server = new Server();
-    server.setTask('basic-queue-worker', basicWorker);
+    server = new Server(new Map([
+      ['basic-queue-worker', basicWorker],
+    ]));
     const jobPromise = Promise.fromCallback((done) => {
       console.log('waiting for emit');
       jobEmitter.on('done', () => { done(''); });
