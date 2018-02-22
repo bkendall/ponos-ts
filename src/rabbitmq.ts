@@ -7,9 +7,9 @@ export type RabbitMessageHandler = (
     done: () => void,
 ) => void;
 
-export type RabbitMQOpts = {
-  name: string,
-  tasks: Set<string>,
+export interface RabbitMQOpts {
+  name: string;
+  tasks: Set<string>;
 }
 
 export class RabbitMQ {
@@ -27,7 +27,7 @@ export class RabbitMQ {
   private username: string;
 
   constructor(opts: RabbitMQOpts) {
-    this.name = opts['name'] || 'ponos';
+    this.name = opts.name || 'ponos';
     this.hostname = process.env.RABBITMQ_HOSTNAME || 'localhost';
     this.port = 5672;
     this.username = process.env.RABBITMQ_USERNAME || '';
