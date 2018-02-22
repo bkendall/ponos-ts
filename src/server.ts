@@ -10,13 +10,17 @@ export class Server {
   private tasks: Map<string, WorkerFunction>;
   private workQueues: Map<string, Array<() => void>>;
 
-  constructor() {
+  constructor(tasks: Map<string, WorkerFunction>) {
     this.workQueues = new Map();
-    this.tasks = new Map();
-    // this.events = new Map();
+    this.tasks = tasks;
     this.rabbitmq = new RabbitMQ({
       name: 'ponos',
+      tasks: new Set([...this.tasks.keys()]),
     });
+
+    for (const [queue, fn] of this.tasks) {
+      this.setTask(queue, fn);
+    }
   }
 
   consume(): Promise<void> {

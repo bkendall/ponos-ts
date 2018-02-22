@@ -7,6 +7,11 @@ export type RabbitMessageHandler = (
     done: () => void,
 ) => void;
 
+export type RabbitMQOpts = {
+  name: string,
+  tasks: Set<string>,
+}
+
 export class RabbitMQ {
   private channel: amqp.Channel;
   private connection: amqp.Connection;
@@ -18,14 +23,16 @@ export class RabbitMQ {
   private publishChannel: amqp.ConfirmChannel;
   private subscribed: Set<string>;
   private subscriptions: Map<string, RabbitMessageHandler>;
+  private tasks: Set<string>;
   private username: string;
 
-  constructor(opts: object) {
-    this.name = 'ponos';
+  constructor(opts: RabbitMQOpts) {
+    this.name = opts['name'] || 'ponos';
     this.hostname = process.env.RABBITMQ_HOSTNAME || 'localhost';
     this.port = 5672;
     this.username = process.env.RABBITMQ_USERNAME || '';
     this.password = process.env.RABBITMQ_PASSWORD || '';
+    this.tasks = opts.tasks || new Set();
     this.setCleanState();
   }
 
@@ -59,8 +66,13 @@ export class RabbitMQ {
       })
       .then((channel) => {
         this.publishChannel = channel;
-      });
-    // TODO(bkendall): Assert Queues and Exchanges.
+      })
+      .then(() => {
+        return Promise.each(this.tasks, (queue) => {
+          return this.assertQueue(`${this.name}.${queue}`);
+        });
+      })
+      .return();
   }
 
   consume(): Promise<void> {
@@ -131,6 +143,10 @@ export class RabbitMQ {
     return Promise.resolve(this.publishChannel.waitForConfirms())
       .then(() => (Promise.resolve(this.connection.close())));
     // TODO(bkendall): Set clean state after this.
+  }
+
+  private assertQueue(queue: string): Promise<void> {
+    return Promise.resolve(this.channel.assertQueue(queue)).return();
   }
 
   private setCleanState(): void {
