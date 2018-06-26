@@ -27,7 +27,7 @@
     "chai-as-promised": "^7.1.1",
     "mocha": "^5.2.0",
     "sinon": "^6.0.0",
-    "ts-node": "^6.1.0",
+    "ts-node": "^7.0.0",
     "tslint": "^5.10.0",
     "typescript": "^2.9.1"
   },
