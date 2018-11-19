@@ -1,0 +1,18 @@
+steps:
+- name: node:8.12.0
+  entrypoint: npm
+  args: ['install']
+  secretEnv: ['NPMTOKEN']
+- name: node:8.12.0
+  entrypoint: npm
+  args: ['test']
+  secretEnv: ['NPMTOKEN']
+- name: node:8.12.0
+  entrypoint: npm
+  args: ['publish']
+  secretEnv: ['NPMTOKEN']
+
+secrets:
+- kmsKeyName: projects/bkend-personal-test-stuff/locations/global/keyRings/cloudbuild/cryptoKeys/cb-ponos-ts
+  secretEnv:
+    'NPMTOKEN': CiQA7gcnyKfM/ti+5r0uQTYkfP2fSO9bbUPwIEaAr2uayuEwL84STQClYuD7LA7T0HxSutjkPdSuT+8UO4ZwJ2DWSYIHubvHvtmhf1MdJZLNPZm+DK+M4hoTEHsNoPumnD21UMA+OO/2dFIp+PB2Dn+l9H4k
