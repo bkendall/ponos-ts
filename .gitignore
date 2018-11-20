@@ -1,3 +1,6 @@
-dist/
-node_modules/
 .npmrc
+.nyc_output/
+coverage/
+dist/
+lib/
+node_modules/
