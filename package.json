@@ -22,8 +22,10 @@
   },
   "nyc": {
     "include": [
-      "src/**/*",
-      "test/**/*"
+      "src/**/*"
+    ],
+    "exclude": [
+      "example/**/*"
     ],
     "extension": [
       ".ts"
@@ -35,6 +37,7 @@
       "html",
       "text-summary"
     ],
+    "all": true,
     "sourceMap": true,
     "instrument": true
   },
