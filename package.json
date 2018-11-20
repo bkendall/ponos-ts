@@ -2,20 +2,47 @@
   "name": "ponos-ts",
   "version": "0.0.1",
   "description": "Typescript port of Ponos",
+  "repository": "https://github.com/bkendall/ponos-ts",
+  "main": "lib/index.js",
   "scripts": {
-    "build-ts": "tsc",
-    "style": "tslint -c tslint.json 'src/**/*.ts'",
-    "test": "mocha $npm_package_options_mocha test/**/*.ts",
-    "test-all": "npm run style && npm run build-ts && npm run test",
-    "test-functional": "mocha $npm_package_options_mocha test-functional/**/*.ts",
-    "watch-test": "mocha $npm_package_options_mocha -w --watch-extensions ts test/**/*.ts",
-    "watch-ts": "tsc --watch"
+    "build": "tsc",
+    "build:watch": "tsc --watch",
+    "clean": "rm -rf lib",
+    "coveralls": "nyc report --reporter text-lcov | coveralls",
+    "lint": "tslint -c tslint.json 'src/**/*.ts'",
+    "prepare": "npm run build",
+    "prepublish": "npm run prepare",
+    "test": "nyc mocha $npm_package_options_mocha test/**/*.ts",
+    "test:all": "npm run lint && npm run build && npm run test",
+    "test:functional": "mocha $npm_package_options_mocha test-functional/**/*.ts",
+    "test:watch": "mocha $npm_package_options_mocha -w --watch-extensions ts test/**/*.ts"
   },
   "options": {
-    "mocha": "--require ts-node/register --require resources/mocha-bootstrap.ts --reporter dot"
+    "mocha": "--require ts-node/register --require resources/mocha-bootstrap.ts --require source-map-support/register --full-trace"
+  },
+  "nyc": {
+    "include": [
+      "src/**/*",
+      "test/**/*"
+    ],
+    "extension": [
+      ".ts"
+    ],
+    "require": [
+      "ts-node/register"
+    ],
+    "reporter": [
+      "html",
+      "text-summary"
+    ],
+    "sourceMap": true,
+    "instrument": true
   },
   "author": "Bryan Kendall <bryan@bryankendall.com>",
   "license": "MIT",
+  "files": [
+    "lib/**/*"
+  ],
   "devDependencies": {
     "@types/amqplib": "^0.5.9",
     "@types/bluebird": "^3.5.24",
@@ -25,8 +52,11 @@
     "@types/sinon": "^5.0.6",
     "chai": "^4.2.0",
     "chai-as-promised": "^7.1.1",
+    "coveralls": "^3.0.2",
     "mocha": "^5.2.0",
+    "nyc": "^13.1.0",
     "sinon": "^7.1.1",
+    "source-map-support": "^0.5.9",
     "ts-node": "^7.0.1",
     "tslint": "^5.11.0",
     "typescript": "^3.1.6"

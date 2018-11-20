@@ -1,23 +1,13 @@
 language: node_js
+sudo: false
 node_js:
 - '10'
 - '8'
 - '6'
-services:
-- rabbitmq
-before_install:
-- npm install -g greenkeeper-lockfile
-before_script:
-- greenkeeper-lockfile-update
 script:
-- npm run style
-- npm run build-ts
+- npm run clean
+- npm run lint
+- npm run build
 - npm run test
-- npm run test-functional
 after_script:
-- greenkeeper-lockfile-upload
-env:
-  global:
-  - RABBITMQ_USERNAME=guest
-  - RABBITMQ_PASSWORD=guest
-  - secure: F8Fb4amngsNekDtA7RD1a5qaW7zLs8R4JBaH2rF0/Lnc0FlDOAo5mtE/lMbuVVGyMn4icGkfDaUP1TvMh+RK82F8EDQ9tHQ7F3m7z4L8ngr00qdVGdtHrxC795JJ43o4MU75/KDL5+jn80NunvzqTI83dimqBbRit7fo/w2BJPIAS7tFZuHQDb5p/3dg6jaNWuS09eMlwIrrCXBz0zCaErpW0CludPHNgvKcvMI+U63xWCFRvKCW8zgGRFhGaKwAAQx+Rdz5GZ4onlpEFgjFMi9bHP/MmPmhAuHgobq1mw/BvI2sd2rjiba9qUvPYFdfLIGR62u835o83TeZtbj92aTA987m4Th+uSG3YdGMK7C5I4meySetjYHU65wPUNqfHzYQJ5yPW6Mgz6oJSxGFqthlWvGMuXmkWRFKB+fy/SMRhRU08lPjubej0hfulXtz7jtPrZYg9yg1tIfUfaiT+T5awYsJwji0rbrbav56571McgFC/0E9tcAobdzFkxSQDZgDSWM5YMbmInvvu7TP0X4cz4/e0w7OrIzyMCOoiysfpXyEmvHJfmUVfDLBOHW7rYrYtPaYP6eIZTkZ0ezrOB/K/aRO0AOUfbUibdtsXRdiY0naOZ2d4vIc2cs3bq2D/bJTZFpCNpZ8v+bMzNQoxcuP1hXf2BSJe4GX0/EJOvA=
+- npm run coveralls 
