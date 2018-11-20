@@ -1,6 +1,6 @@
 {
   "name": "ponos-ts",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "description": "Typescript port of Ponos",
   "scripts": {
     "build-ts": "tsc",
