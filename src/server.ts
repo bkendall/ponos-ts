@@ -8,7 +8,7 @@ export class Server {
   // private events: Map<string, Function>;
   private rabbitmq: RabbitMQ;
   private tasks: Map<string, WorkerFunction>;
-  private workQueues: Map<string, Array<() => void>>;
+  private workQueues: Map<string, (() => void)[]>;
 
   constructor(tasks: Map<string, WorkerFunction>) {
     this.workQueues = new Map();
