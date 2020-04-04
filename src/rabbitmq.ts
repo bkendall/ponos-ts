@@ -85,7 +85,7 @@ export class RabbitMQ {
         console.log(`already consuming queue ${queue}`);
         return;
       }
-      const wrapper = (msg: amqp.Message) => {
+      const wrapper = (msg: amqp.Message): void => {
         let job;
         const jobMeta = msg.properties || {};
         try {
@@ -117,6 +117,7 @@ export class RabbitMQ {
     });
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   publishTask(queue: string, content: object): Promise<void> {
     return Promise.try(() => {
       const queueName = `${this.name}.${queue}`;

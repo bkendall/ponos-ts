@@ -4,20 +4,20 @@ export interface WorkerData {
   message: string;
 }
 
-export type WorkerFunction = (data: WorkerData) => Promise<any>;
+export type WorkerFunction = (data: WorkerData) => Promise<unknown>;
 
 export class PonosWorker {
   attempt: number;
   job: WorkerData;
   msTimeout: number;
   queue: string;
-  task: (data: WorkerData) => void;
+  task: WorkerFunction;
 
   constructor(
     attempt: number,
     job: WorkerData,
     queue: string,
-    task: (data: WorkerData) => void
+    task: WorkerFunction
   ) {
     this.attempt = attempt;
     this.job = job;
@@ -31,7 +31,7 @@ export class PonosWorker {
     attempt: number,
     job: WorkerData,
     queue: string,
-    task: (data: WorkerData) => void
+    task: WorkerFunction
   ): PonosWorker {
     return new PonosWorker(attempt, job, queue, task);
   }
@@ -39,18 +39,18 @@ export class PonosWorker {
   run(): Promise<void> {
     // TODO(bkendall): there's more error handling to be done.
     return Promise.bind(this)
-      .then(this.wrapTask)
-      .then(this.handleTaskSuccess)
+      .then(() => this.wrapTask())
+      .then(() => this.handleTaskSuccess())
       .catch((err) => {
         console.error(err);
         throw err;
       })
-      .catch(this.retryWithDelay);
+      .catch((err) => this.retryWithDelay(err));
   }
 
   // TODO(bkendall): validate a job.
 
-  private wrapTask(): Promise<any> {
+  private wrapTask(): Promise<unknown> {
     let taskPromise = Promise.try(() => {
       return this.task(this.job);
     });
@@ -62,14 +62,15 @@ export class PonosWorker {
     return taskPromise;
   }
 
-  private retryWithDelay(err: object) {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  private retryWithDelay(err: object): Promise<void> {
     // TODO(bkendall): actually delay us some amount.
     return Promise.delay(200).then(() => {
       return this.run();
     });
   }
 
-  private handleTaskSuccess() {
+  private handleTaskSuccess(): void {
     // TODO(bkendall): do something more useful here.
     // console.log('success');
   }

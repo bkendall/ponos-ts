@@ -86,7 +86,7 @@ export class Server {
     }
   }
 
-  private workLoop(name: string) {
+  private workLoop(name: string): Promise<void> {
     return Promise.try(() => {
       const worker = this.workQueues.get(name).pop();
       if (worker) {
