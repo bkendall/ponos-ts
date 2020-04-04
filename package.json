@@ -47,7 +47,7 @@
   ],
   "devDependencies": {
     "@types/amqplib": "^0.5.11",
-    "@types/bluebird": "^3.5.26",
+    "@types/bluebird": "^3.5.30",
     "@types/chai": "^4.2.11",
     "@types/chai-as-promised": "^7.1.0",
     "@types/mocha": "^7.0.2",
@@ -65,6 +65,6 @@
   },
   "dependencies": {
     "amqplib": "^0.5.3",
-    "bluebird": "^3.5.4"
+    "bluebird": "^3.7.2"
   }
 }
