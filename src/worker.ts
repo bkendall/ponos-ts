@@ -1,4 +1,4 @@
-import * as Promise from 'bluebird';
+import * as Promise from "bluebird";
 
 export interface WorkerData {
   message: string;
@@ -14,10 +14,10 @@ export class PonosWorker {
   task: (data: WorkerData) => void;
 
   constructor(
-      attempt: number,
-      job: WorkerData,
-      queue: string,
-      task: (data: WorkerData) => void,
+    attempt: number,
+    job: WorkerData,
+    queue: string,
+    task: (data: WorkerData) => void
   ) {
     this.attempt = attempt;
     this.job = job;
@@ -28,10 +28,10 @@ export class PonosWorker {
   }
 
   static create(
-      attempt: number,
-      job: WorkerData,
-      queue: string,
-      task: (data: WorkerData) => void,
+    attempt: number,
+    job: WorkerData,
+    queue: string,
+    task: (data: WorkerData) => void
   ): PonosWorker {
     return new PonosWorker(attempt, job, queue, task);
   }
@@ -64,10 +64,9 @@ export class PonosWorker {
 
   private retryWithDelay(err: object) {
     // TODO(bkendall): actually delay us some amount.
-    return Promise.delay(200)
-      .then(() => {
-        return this.run();
-      });
+    return Promise.delay(200).then(() => {
+      return this.run();
+    });
   }
 
   private handleTaskSuccess() {
