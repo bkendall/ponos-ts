@@ -1,1 +1,1 @@
-export {Server, WorkerData, WorkerFunction} from './server';
+export { Server, WorkerData, WorkerFunction } from "./server";
