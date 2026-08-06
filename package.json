@@ -1,6 +1,6 @@
 {
   "name": "ponos-ts",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Typescript port of Ponos",
   "repository": "https://github.com/bkendall/ponos-ts",
   "main": "lib/index.js",
