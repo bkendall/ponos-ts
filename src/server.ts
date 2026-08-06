@@ -1,8 +1,9 @@
-import * as Promise from "bluebird";
-import { RabbitMQ } from "./rabbitmq";
-import { PonosWorker, WorkerData, WorkerFunction } from "./worker";
+import Promise from "bluebird";
+import { RabbitMQ } from "./rabbitmq.js";
+import { PonosWorker } from "./worker.js";
+import type { WorkerData, WorkerFunction } from "./worker.js";
 
-export { WorkerData, WorkerFunction };
+export type { WorkerData, WorkerFunction };
 
 export class Server {
   // private events: Map<string, Function>;
@@ -36,7 +37,7 @@ export class Server {
       .then(() => {
         return this.consume();
       })
-      .catch((err) => {
+      .catch((err: unknown) => {
         console.error("start error", err);
         throw err;
       });
@@ -48,7 +49,7 @@ export class Server {
       .then(() => {
         return this.rabbitmq.disconnect();
       })
-      .catch((err: Error) => {
+      .catch((err: unknown) => {
         console.error("stop error", err);
         throw err;
       });
@@ -61,12 +62,15 @@ export class Server {
   }
 
   private subscribeAll(): Promise<void> {
-    return Promise.map(this.tasks.keys(), (queue) => {
+    return Promise.map(Array.from(this.tasks.keys()), (queue: string) => {
       return this.rabbitmq.subscribeToQueue(
         queue,
         (job: WorkerData, jobMeta: object, done: () => void): void => {
-          this.enqueue(queue, this.tasks.get(queue), job, jobMeta, done);
-        }
+          const task = this.tasks.get(queue);
+          if (task) {
+            this.enqueue(queue, task, job, jobMeta, done);
+          }
+        },
       );
     }).return();
   }
@@ -76,19 +80,25 @@ export class Server {
     worker: WorkerFunction,
     job: WorkerData,
     jobMeta: object,
-    done: () => void
+    done: () => void,
   ): void {
-    this.workQueues.get(name).push(() => {
+    let queue = this.workQueues.get(name);
+    if (!queue) {
+      queue = [];
+      this.workQueues.set(name, queue);
+    }
+    queue.push(() => {
       this.runWorker(name, worker, job, jobMeta, done);
     });
-    if (this.workQueues.get(name).length == 1) {
+    if (queue.length === 1) {
       this.workLoop(name);
     }
   }
 
   private workLoop(name: string): Promise<void> {
     return Promise.try(() => {
-      const worker = this.workQueues.get(name).pop();
+      const queue = this.workQueues.get(name);
+      const worker = queue?.pop();
       if (worker) {
         worker();
         this.workLoop(name);
@@ -101,7 +111,7 @@ export class Server {
     handler: WorkerFunction,
     job: WorkerData,
     jobMeta: object,
-    done: () => void
+    done: () => void,
   ): Promise<void> {
     const worker = PonosWorker.create(0, job, queueName, handler);
     return worker.run().finally(() => {

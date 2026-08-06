@@ -1,10 +1,12 @@
-import * as Promise from "bluebird";
+import Promise from "bluebird";
 
 export interface WorkerData {
   message: string;
 }
 
-export type WorkerFunction = (data: WorkerData) => Promise<unknown>;
+export type WorkerFunction = (
+  data: WorkerData,
+) => Promise<unknown> | PromiseLike<unknown>;
 
 export class PonosWorker {
   attempt: number;
@@ -17,7 +19,7 @@ export class PonosWorker {
     attempt: number,
     job: WorkerData,
     queue: string,
-    task: WorkerFunction
+    task: WorkerFunction,
   ) {
     this.attempt = attempt;
     this.job = job;
@@ -31,7 +33,7 @@ export class PonosWorker {
     attempt: number,
     job: WorkerData,
     queue: string,
-    task: WorkerFunction
+    task: WorkerFunction,
   ): PonosWorker {
     return new PonosWorker(attempt, job, queue, task);
   }
@@ -41,11 +43,11 @@ export class PonosWorker {
     return Promise.bind(this)
       .then(() => this.wrapTask())
       .then(() => this.handleTaskSuccess())
-      .catch((err) => {
+      .catch((err: unknown) => {
         console.error(err);
         throw err;
       })
-      .catch((err) => this.retryWithDelay(err));
+      .catch((err: unknown) => this.retryWithDelay(err));
   }
 
   // TODO(bkendall): validate a job.
@@ -63,7 +65,7 @@ export class PonosWorker {
   }
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  private retryWithDelay(err: object): Promise<void> {
+  private retryWithDelay(err: unknown): Promise<void> {
     // TODO(bkendall): actually delay us some amount.
     return Promise.delay(200).then(() => {
       return this.run();

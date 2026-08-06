@@ -1,10 +1,10 @@
 import * as amqp from "amqplib";
-import * as Promise from "bluebird";
+import Promise from "bluebird";
 
 export type RabbitMessageHandler = (
-  job: object,
+  job: any,
   jobMeta: object,
-  done: () => void
+  done: () => void,
 ) => void;
 
 export interface RabbitMQOpts {
@@ -13,16 +13,17 @@ export interface RabbitMQOpts {
 }
 
 export class RabbitMQ {
-  private channel: amqp.Channel;
-  private connection: amqp.Connection;
-  private consuming: Map<string, string>;
+  private channel?: amqp.Channel;
+  private connection?: amqp.ChannelModel;
+  private consuming: Map<string, string> = new Map();
+
   private hostname: string;
   private name: string;
   private password: string;
   private port: number;
-  private publishChannel: amqp.ConfirmChannel;
-  private subscribed: Set<string>;
-  private subscriptions: Map<string, RabbitMessageHandler>;
+  private publishChannel?: amqp.ConfirmChannel;
+  private subscribed: Set<string> = new Set();
+  private subscriptions: Map<string, RabbitMessageHandler> = new Map();
   private tasks: Set<string>;
   private username: string;
 
@@ -44,31 +45,33 @@ export class RabbitMQ {
     const url = `amqp://${authString}${this.hostname}:${this.port}`;
     console.log(url);
     return Promise.resolve(amqp.connect(url, {}))
-      .catch((err) => {
+      .catch((err: unknown) => {
         console.error("connect", err);
         throw err;
       })
       .then((conn) => {
         this.connection = conn;
-        return Promise.resolve(this.connection.createChannel()).catch((err) => {
-          console.error("createChannel", err);
-          throw err;
-        });
+        return Promise.resolve(this.connection.createChannel()).catch(
+          (err: unknown) => {
+            console.error("createChannel", err);
+            throw err;
+          },
+        );
       })
       .then((channel) => {
         this.channel = channel;
-        return Promise.resolve(this.connection.createConfirmChannel()).catch(
-          (err) => {
+        return Promise.resolve(this.connection!.createConfirmChannel()).catch(
+          (err: unknown) => {
             console.error("createConfirmChannel", err);
             throw err;
-          }
+          },
         );
       })
       .then((channel) => {
         this.publishChannel = channel;
       })
       .then(() => {
-        return Promise.each(this.tasks, (queue) => {
+        return Promise.each(Array.from(this.tasks), (queue: string) => {
           return this.assertQueue(`${this.name}.${queue}`);
         });
       })
@@ -79,18 +82,23 @@ export class RabbitMQ {
     const subscriptions = this.subscriptions;
     this.subscriptions = new Map();
     const channel = this.channel;
-    return Promise.map(subscriptions.keys(), (queue) => {
+    if (!channel) {
+      return Promise.reject(new Error("Channel not initialized"));
+    }
+    return Promise.map(Array.from(subscriptions.keys()), (queue: string) => {
       const handler = subscriptions.get(queue);
+      if (!handler) return;
       if (this.consuming.has(queue)) {
         console.log(`already consuming queue ${queue}`);
         return;
       }
-      const wrapper = (msg: amqp.Message): void => {
+      const wrapper = (msg: amqp.ConsumeMessage | null): void => {
+        if (!msg) return;
         let job;
         const jobMeta = msg.properties || {};
         try {
           job = JSON.parse(`${msg.content}`);
-        } catch (err) {
+        } catch {
           console.error(`content not valid json`);
           return channel.ack(msg);
         }
@@ -98,17 +106,17 @@ export class RabbitMQ {
           channel.ack(msg);
         });
       };
-      return Promise.resolve(this.channel.consume(queue, wrapper)).then(
+      return Promise.resolve(channel.consume(queue, wrapper)).then(
         (consumeInfo) => {
           this.consuming.set(queue, consumeInfo.consumerTag);
-        }
+        },
       );
     }).return();
   }
 
   subscribeToQueue(
     queue: string,
-    handler: RabbitMessageHandler
+    handler: RabbitMessageHandler,
   ): Promise<void> {
     const queueName = `${this.name}.${queue}`;
     return Promise.try(() => {
@@ -122,16 +130,20 @@ export class RabbitMQ {
     return Promise.try(() => {
       const queueName = `${this.name}.${queue}`;
       const payload = Buffer.from(JSON.stringify({}));
+      if (!this.publishChannel) {
+        throw new Error("Publish channel not initialized");
+      }
       return Promise.resolve(
-        this.publishChannel.sendToQueue(queueName, payload)
+        this.publishChannel.sendToQueue(queueName, payload),
       ).return();
     });
   }
 
   unsubscribe(): Promise<void> {
     const consuming = this.consuming;
-    return Promise.map(consuming.keys(), (queue) => {
+    return Promise.map(Array.from(consuming.keys()), (queue: string) => {
       const consumerTag = consuming.get(queue);
+      if (!consumerTag || !this.channel) return;
       return Promise.resolve(this.channel.cancel(consumerTag)).then(() => {
         this.consuming.delete(queue);
       });
@@ -139,19 +151,26 @@ export class RabbitMQ {
   }
 
   disconnect(): Promise<void> {
-    return Promise.resolve(this.publishChannel.waitForConfirms()).then(() =>
-      Promise.resolve(this.connection.close())
-    );
+    if (!this.publishChannel || !this.connection) {
+      return Promise.resolve();
+    }
+    return Promise.resolve(this.publishChannel.waitForConfirms())
+      .then(() => Promise.resolve(this.connection?.close()))
+      .return();
     // TODO(bkendall): Set clean state after this.
   }
 
   private assertQueue(queue: string): Promise<void> {
+    if (!this.channel) {
+      return Promise.reject(new Error("Channel not initialized"));
+    }
     return Promise.resolve(this.channel.assertQueue(queue)).return();
   }
 
   private setCleanState(): void {
-    delete this.channel;
-    delete this.connection;
+    this.channel = undefined;
+    this.connection = undefined;
+    this.publishChannel = undefined;
     this.subscriptions = new Map();
     this.subscribed = new Set();
     this.consuming = new Map();
