@@ -1,4 +1,4 @@
-import * as amqp from "amqplib";
+import amqp from "amqplib";
 
 export type RabbitMessageHandler = (
   job: any,
