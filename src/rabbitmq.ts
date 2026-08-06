@@ -1,5 +1,4 @@
 import * as amqp from "amqplib";
-import Promise from "bluebird";
 
 export type RabbitMessageHandler = (
   job: any,
@@ -37,64 +36,42 @@ export class RabbitMQ {
     this.setCleanState();
   }
 
-  connect(): Promise<void> {
+  async connect(): Promise<void> {
     let authString = "";
     if (this.username && this.password) {
       authString = `${this.username}:${this.password}@`;
     }
     const url = `amqp://${authString}${this.hostname}:${this.port}`;
     console.log(url);
-    return Promise.resolve(amqp.connect(url, {}))
-      .catch((err: unknown) => {
-        console.error("connect", err);
-        throw err;
-      })
-      .then((conn) => {
-        this.connection = conn;
-        return Promise.resolve(this.connection.createChannel()).catch(
-          (err: unknown) => {
-            console.error("createChannel", err);
-            throw err;
-          },
-        );
-      })
-      .then((channel) => {
-        this.channel = channel;
-        return Promise.resolve(this.connection!.createConfirmChannel()).catch(
-          (err: unknown) => {
-            console.error("createConfirmChannel", err);
-            throw err;
-          },
-        );
-      })
-      .then((channel) => {
-        this.publishChannel = channel;
-      })
-      .then(() => {
-        return Promise.each(Array.from(this.tasks), (queue: string) => {
-          return this.assertQueue(`${this.name}.${queue}`);
-        });
-      })
-      .return();
+    try {
+      this.connection = await amqp.connect(url, {});
+      this.channel = await this.connection.createChannel();
+      this.publishChannel = await this.connection.createConfirmChannel();
+
+      for (const queue of this.tasks) {
+        await this.assertQueue(`${this.name}.${queue}`);
+      }
+    } catch (err: unknown) {
+      console.error("connect error", err);
+      throw err;
+    }
   }
 
-  consume(): Promise<void> {
+  async consume(): Promise<void> {
     const subscriptions = this.subscriptions;
     this.subscriptions = new Map();
     const channel = this.channel;
     if (!channel) {
-      return Promise.reject(new Error("Channel not initialized"));
+      throw new Error("Channel not initialized");
     }
-    return Promise.map(Array.from(subscriptions.keys()), (queue: string) => {
-      const handler = subscriptions.get(queue);
-      if (!handler) return;
+    for (const [queue, handler] of subscriptions) {
       if (this.consuming.has(queue)) {
         console.log(`already consuming queue ${queue}`);
-        return;
+        continue;
       }
       const wrapper = (msg: amqp.ConsumeMessage | null): void => {
         if (!msg) return;
-        let job;
+        let job: any;
         const jobMeta = msg.properties || {};
         try {
           job = JSON.parse(`${msg.content}`);
@@ -106,65 +83,53 @@ export class RabbitMQ {
           channel.ack(msg);
         });
       };
-      return Promise.resolve(channel.consume(queue, wrapper)).then(
-        (consumeInfo) => {
-          this.consuming.set(queue, consumeInfo.consumerTag);
-        },
-      );
-    }).return();
+      const consumeInfo = await channel.consume(queue, wrapper);
+      this.consuming.set(queue, consumeInfo.consumerTag);
+    }
   }
 
-  subscribeToQueue(
+  async subscribeToQueue(
     queue: string,
     handler: RabbitMessageHandler,
   ): Promise<void> {
     const queueName = `${this.name}.${queue}`;
-    return Promise.try(() => {
-      this.subscriptions.set(queueName, handler);
-      this.subscribed.add(`queue:::${queueName}`);
-    });
+    this.subscriptions.set(queueName, handler);
+    this.subscribed.add(`queue:::${queueName}`);
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  publishTask(queue: string, content: object): Promise<void> {
-    return Promise.try(() => {
-      const queueName = `${this.name}.${queue}`;
-      const payload = Buffer.from(JSON.stringify({}));
-      if (!this.publishChannel) {
-        throw new Error("Publish channel not initialized");
-      }
-      return Promise.resolve(
-        this.publishChannel.sendToQueue(queueName, payload),
-      ).return();
-    });
-  }
-
-  unsubscribe(): Promise<void> {
-    const consuming = this.consuming;
-    return Promise.map(Array.from(consuming.keys()), (queue: string) => {
-      const consumerTag = consuming.get(queue);
-      if (!consumerTag || !this.channel) return;
-      return Promise.resolve(this.channel.cancel(consumerTag)).then(() => {
-        this.consuming.delete(queue);
-      });
-    }).return();
-  }
-
-  disconnect(): Promise<void> {
-    if (!this.publishChannel || !this.connection) {
-      return Promise.resolve();
+  async publishTask(queue: string, content: object): Promise<void> {
+    const queueName = `${this.name}.${queue}`;
+    const payload = Buffer.from(JSON.stringify(content));
+    if (!this.publishChannel) {
+      throw new Error("Publish channel not initialized");
     }
-    return Promise.resolve(this.publishChannel.waitForConfirms())
-      .then(() => Promise.resolve(this.connection?.close()))
-      .return();
+    this.publishChannel.sendToQueue(queueName, payload);
+  }
+
+  async unsubscribe(): Promise<void> {
+    const consuming = this.consuming;
+    for (const [queue, consumerTag] of consuming) {
+      if (consumerTag && this.channel) {
+        await this.channel.cancel(consumerTag);
+        this.consuming.delete(queue);
+      }
+    }
+  }
+
+  async disconnect(): Promise<void> {
+    if (!this.publishChannel || !this.connection) {
+      return;
+    }
+    await this.publishChannel.waitForConfirms();
+    await this.connection.close();
     // TODO(bkendall): Set clean state after this.
   }
 
-  private assertQueue(queue: string): Promise<void> {
+  private async assertQueue(queue: string): Promise<void> {
     if (!this.channel) {
-      return Promise.reject(new Error("Channel not initialized"));
+      throw new Error("Channel not initialized");
     }
-    return Promise.resolve(this.channel.assertQueue(queue)).return();
+    await this.channel.assertQueue(queue);
   }
 
   private setCleanState(): void {

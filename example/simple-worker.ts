@@ -1,15 +1,11 @@
-import Promise from "bluebird";
 import { Server } from "../src/index.js";
 import type { WorkerData, WorkerFunction } from "../src/index.js";
 
-
-const basicWorker: WorkerFunction = (job: WorkerData): Promise<void> => {
-  return Promise.try(() => {
-    if (!job.message) {
-      throw new Error("message is required");
-    }
-    console.log(`hello world: ${job.message}`);
-  });
+const basicWorker: WorkerFunction = async (job: WorkerData): Promise<void> => {
+  if (!job.message) {
+    throw new Error("message is required");
+  }
+  console.log(`hello world: ${job.message}`);
 };
 
 const tasks = new Map<string, WorkerFunction>([

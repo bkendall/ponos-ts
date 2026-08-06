@@ -1,4 +1,3 @@
-import Promise from "bluebird";
 import sinon from "sinon";
 import { expect } from "chai";
 import { PonosWorker } from "../src/worker.js";
@@ -10,7 +9,7 @@ describe("PonosWorker", () => {
         0,
         { message: "" },
         "someQueue",
-        () => Promise.resolve()
+        async () => {}
       );
 
       expect(newWorker).to.be.an.instanceof(PonosWorker);

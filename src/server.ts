@@ -1,4 +1,3 @@
-import Promise from "bluebird";
 import { RabbitMQ } from "./rabbitmq.js";
 import { PonosWorker } from "./worker.js";
 import type { WorkerData, WorkerFunction } from "./worker.js";
@@ -24,35 +23,29 @@ export class Server {
     }
   }
 
-  consume(): Promise<void> {
-    return this.rabbitmq.consume().return();
+  async consume(): Promise<void> {
+    await this.rabbitmq.consume();
   }
 
-  start(): Promise<void> {
-    return this.rabbitmq
-      .connect()
-      .then(() => {
-        return this.subscribeAll();
-      })
-      .then(() => {
-        return this.consume();
-      })
-      .catch((err: unknown) => {
-        console.error("start error", err);
-        throw err;
-      });
+  async start(): Promise<void> {
+    try {
+      await this.rabbitmq.connect();
+      await this.subscribeAll();
+      await this.consume();
+    } catch (err: unknown) {
+      console.error("start error", err);
+      throw err;
+    }
   }
 
-  stop(): Promise<void> {
-    return this.rabbitmq
-      .unsubscribe()
-      .then(() => {
-        return this.rabbitmq.disconnect();
-      })
-      .catch((err: unknown) => {
-        console.error("stop error", err);
-        throw err;
-      });
+  async stop(): Promise<void> {
+    try {
+      await this.rabbitmq.unsubscribe();
+      await this.rabbitmq.disconnect();
+    } catch (err: unknown) {
+      console.error("stop error", err);
+      throw err;
+    }
   }
 
   setTask(queueName: string, task: WorkerFunction): this {
@@ -61,18 +54,20 @@ export class Server {
     return this;
   }
 
-  private subscribeAll(): Promise<void> {
-    return Promise.map(Array.from(this.tasks.keys()), (queue: string) => {
-      return this.rabbitmq.subscribeToQueue(
-        queue,
-        (job: WorkerData, jobMeta: object, done: () => void): void => {
-          const task = this.tasks.get(queue);
-          if (task) {
-            this.enqueue(queue, task, job, jobMeta, done);
-          }
-        },
-      );
-    }).return();
+  private async subscribeAll(): Promise<void> {
+    await Promise.all(
+      Array.from(this.tasks.keys()).map((queue: string) => {
+        return this.rabbitmq.subscribeToQueue(
+          queue,
+          (job: WorkerData, jobMeta: object, done: () => void): void => {
+            const task = this.tasks.get(queue);
+            if (task) {
+              this.enqueue(queue, task, job, jobMeta, done);
+            }
+          },
+        );
+      }),
+    );
   }
 
   private enqueue(
@@ -88,25 +83,23 @@ export class Server {
       this.workQueues.set(name, queue);
     }
     queue.push(() => {
-      this.runWorker(name, worker, job, jobMeta, done);
+      void this.runWorker(name, worker, job, jobMeta, done);
     });
     if (queue.length === 1) {
-      this.workLoop(name);
+      void this.workLoop(name);
     }
   }
 
-  private workLoop(name: string): Promise<void> {
-    return Promise.try(() => {
-      const queue = this.workQueues.get(name);
-      const worker = queue?.pop();
-      if (worker) {
-        worker();
-        this.workLoop(name);
-      }
-    });
+  private async workLoop(name: string): Promise<void> {
+    const queue = this.workQueues.get(name);
+    const worker = queue?.pop();
+    if (worker) {
+      worker();
+      await this.workLoop(name);
+    }
   }
 
-  private runWorker(
+  private async runWorker(
     queueName: string,
     handler: WorkerFunction,
     job: WorkerData,
@@ -114,8 +107,10 @@ export class Server {
     done: () => void,
   ): Promise<void> {
     const worker = PonosWorker.create(0, job, queueName, handler);
-    return worker.run().finally(() => {
+    try {
+      await worker.run();
+    } finally {
       done();
-    });
+    }
   }
 }
