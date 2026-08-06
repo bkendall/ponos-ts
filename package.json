@@ -12,13 +12,30 @@
     "build": "tsc",
     "build:watch": "tsc --watch",
     "clean": "rm -rf lib",
-    "coveralls": "nyc report --reporter text-lcov | coveralls",
+    "coverage": "c8 mocha 'test/**/*.ts'",
     "lint": "eslint src",
     "prepare": "npm run build",
     "test": "npm run lint && npm run build && npm run test:mocha",
+    "test:coverage": "npm run coverage",
     "test:mocha": "mocha 'test/**/*.ts'",
     "test:functional": "mocha 'test-functional/**/*.ts'",
     "test:watch": "mocha -w --watch-extensions ts 'test/**/*.ts'"
+  },
+  "c8": {
+    "all": true,
+    "include": [
+      "src/**/*.ts"
+    ],
+    "exclude": [
+      "test/**/*",
+      "test-functional/**/*",
+      "example/**/*"
+    ],
+    "reporter": [
+      "text",
+      "html",
+      "lcov"
+    ]
   },
   "nyc": {
     "include": [
@@ -49,9 +66,9 @@
     "@types/sinon": "^22.0.0",
     "@typescript-eslint/eslint-plugin": "^8.18.0",
     "@typescript-eslint/parser": "^8.18.0",
+    "c8": "^10.0.0",
     "chai": "^6.2.2",
     "chai-as-promised": "^8.0.1",
-    "coveralls": "^3.1.1",
     "eslint": "^10.8.0",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-prettier": "^5.2.1",
