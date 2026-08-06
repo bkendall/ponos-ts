@@ -62,7 +62,7 @@
     "source-map-support": "^0.5.21",
     "ts-node": "^10.9.2",
     "tsx": "^4.19.2",
-    "typescript": "^6.0.0"
+    "typescript": "^7.0.2"
   },
   "dependencies": {
     "amqplib": "^2.0.1"
