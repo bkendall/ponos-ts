@@ -1,0 +1,13 @@
+{
+  "extension": [
+    "ts"
+  ],
+  "import": [
+    "tsx"
+  ],
+  "require": [
+    "resources/mocha-bootstrap.ts"
+  ],
+  "recursive": true,
+  "fullTrace": true
+}

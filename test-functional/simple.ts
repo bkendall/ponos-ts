@@ -1,60 +1,48 @@
-import {expect} from 'chai';
-import * as EventEmitter from 'events';
-import * as Promise from 'bluebird';
-import * as sinon from 'sinon';
-import {RabbitMQ} from '../src/rabbitmq';
-import {Server, WorkerData, WorkerFunction} from '../src/index';
+import { expect } from "chai";
+import { EventEmitter } from "events";
+import { RabbitMQ } from "../src/rabbitmq.js";
+import { Server } from "../src/index.js";
+import type { WorkerData, WorkerFunction } from "../src/index.js";
 
-describe('Simple Example', () => {
+describe("Simple Example", () => {
   let server: Server;
   let rabbitmq: RabbitMQ;
-  let jobEmitter: EventEmitter = new EventEmitter();
-  const basicWorker: WorkerFunction = (job: WorkerData): Promise<void> => {
-    return Promise.try(() => {
-      console.log('worker got it');
-      jobEmitter.emit('done');
-    });
+  const jobEmitter: EventEmitter = new EventEmitter();
+  const basicWorker: WorkerFunction = async (_job: WorkerData): Promise<void> => {
+    console.log("worker got it");
+    jobEmitter.emit("done");
   };
 
   before(() => {
     rabbitmq = new RabbitMQ({
-      name: 'ponos',
-      tasks: new Set([
-        'basic-queue-worker',
-      ]),
+      name: "ponos",
+      tasks: new Set(["basic-queue-worker"]),
     });
     return rabbitmq.connect();
   });
 
-  it('should call our basic worker', () => {
-    server = new Server(new Map([
-      ['basic-queue-worker', basicWorker],
-    ]));
-    const jobPromise = Promise.fromCallback((done) => {
-      console.log('waiting for emit');
-      jobEmitter.on('done', () => { done(''); });
-    });
-    return server.start()
-      .then(() => {
-        console.log('waiting for publish');
-        return rabbitmq.publishTask('basic-queue-worker', {});
-      })
-      .then(() => {
-        console.log('waiting on promise');
-        return jobPromise;
-      })
-      .then(() => {
-        expect(jobPromise).to.eventually.be.fulfilled;
-      })
-      .catch((err) => {
-        console.error(err);
-        throw err;
-      })
-      .finally(() => {
-        return Promise.all([
-          rabbitmq.disconnect(),
-          server.stop(),
-        ]);
+  it("should call our basic worker", async () => {
+    server = new Server(new Map([["basic-queue-worker", basicWorker]]));
+    const jobPromise = new Promise<void>((resolve) => {
+      console.log("waiting for emit");
+      jobEmitter.on("done", () => {
+        resolve();
       });
+    });
+    try {
+      await server.start();
+      console.log("waiting for publish");
+      await rabbitmq.publishTask("basic-queue-worker", {});
+      console.log("waiting on promise");
+      await jobPromise;
+      await expect(jobPromise).to.eventually.be.fulfilled;
+    } catch (err: unknown) {
+      console.error(err);
+      throw err;
+    } finally {
+      await Promise.all([rabbitmq.disconnect(), server.stop()]);
+    }
   });
 });
+
+

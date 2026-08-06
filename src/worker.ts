@@ -1,10 +1,10 @@
-import * as Promise from "bluebird";
-
 export interface WorkerData {
   message: string;
 }
 
-export type WorkerFunction = (data: WorkerData) => Promise<unknown>;
+export type WorkerFunction = (
+  data: WorkerData,
+) => Promise<unknown> | PromiseLike<unknown>;
 
 export class PonosWorker {
   attempt: number;
@@ -17,7 +17,7 @@ export class PonosWorker {
     attempt: number,
     job: WorkerData,
     queue: string,
-    task: WorkerFunction
+    task: WorkerFunction,
   ) {
     this.attempt = attempt;
     this.job = job;
@@ -31,43 +31,50 @@ export class PonosWorker {
     attempt: number,
     job: WorkerData,
     queue: string,
-    task: WorkerFunction
+    task: WorkerFunction,
   ): PonosWorker {
     return new PonosWorker(attempt, job, queue, task);
   }
 
-  run(): Promise<void> {
+  async run(): Promise<void> {
     // TODO(bkendall): there's more error handling to be done.
-    return Promise.bind(this)
-      .then(() => this.wrapTask())
-      .then(() => this.handleTaskSuccess())
-      .catch((err) => {
-        console.error(err);
-        throw err;
-      })
-      .catch((err) => this.retryWithDelay(err));
+    try {
+      await this.wrapTask();
+      this.handleTaskSuccess();
+    } catch (err: unknown) {
+      console.error(err);
+      await this.retryWithDelay(err);
+    }
   }
 
   // TODO(bkendall): validate a job.
 
-  private wrapTask(): Promise<unknown> {
-    let taskPromise = Promise.try(() => {
-      return this.task(this.job);
-    });
+  private async wrapTask(): Promise<unknown> {
+    const taskPromise = Promise.resolve().then(() => this.task(this.job));
 
-    if (this.msTimeout) {
-      taskPromise = taskPromise.timeout(this.msTimeout);
+    if (!this.msTimeout) {
+      return await taskPromise;
     }
 
-    return taskPromise;
+    let timer: NodeJS.Timeout;
+    const timeoutPromise = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        reject(new Error(`Operation timed out after ${this.msTimeout}ms`));
+      }, this.msTimeout);
+    });
+
+    try {
+      return await Promise.race([taskPromise, timeoutPromise]);
+    } finally {
+      clearTimeout(timer!);
+    }
   }
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  private retryWithDelay(err: object): Promise<void> {
+  private async retryWithDelay(err: unknown): Promise<void> {
     // TODO(bkendall): actually delay us some amount.
-    return Promise.delay(200).then(() => {
-      return this.run();
-    });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    return this.run();
   }
 
   private handleTaskSuccess(): void {

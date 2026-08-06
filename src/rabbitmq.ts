@@ -1,10 +1,9 @@
-import * as amqp from "amqplib";
-import * as Promise from "bluebird";
+import amqp from "amqplib";
 
 export type RabbitMessageHandler = (
-  job: object,
+  job: any,
   jobMeta: object,
-  done: () => void
+  done: () => void,
 ) => void;
 
 export interface RabbitMQOpts {
@@ -13,16 +12,17 @@ export interface RabbitMQOpts {
 }
 
 export class RabbitMQ {
-  private channel: amqp.Channel;
-  private connection: amqp.Connection;
-  private consuming: Map<string, string>;
+  private channel?: amqp.Channel;
+  private connection?: amqp.ChannelModel;
+  private consuming: Map<string, string> = new Map();
+
   private hostname: string;
   private name: string;
   private password: string;
   private port: number;
-  private publishChannel: amqp.ConfirmChannel;
-  private subscribed: Set<string>;
-  private subscriptions: Map<string, RabbitMessageHandler>;
+  private publishChannel?: amqp.ConfirmChannel;
+  private subscribed: Set<string> = new Set();
+  private subscriptions: Map<string, RabbitMessageHandler> = new Map();
   private tasks: Set<string>;
   private username: string;
 
@@ -36,61 +36,46 @@ export class RabbitMQ {
     this.setCleanState();
   }
 
-  connect(): Promise<void> {
+  async connect(): Promise<void> {
     let authString = "";
     if (this.username && this.password) {
       authString = `${this.username}:${this.password}@`;
     }
     const url = `amqp://${authString}${this.hostname}:${this.port}`;
     console.log(url);
-    return Promise.resolve(amqp.connect(url, {}))
-      .catch((err) => {
-        console.error("connect", err);
-        throw err;
-      })
-      .then((conn) => {
-        this.connection = conn;
-        return Promise.resolve(this.connection.createChannel()).catch((err) => {
-          console.error("createChannel", err);
-          throw err;
-        });
-      })
-      .then((channel) => {
-        this.channel = channel;
-        return Promise.resolve(this.connection.createConfirmChannel()).catch(
-          (err) => {
-            console.error("createConfirmChannel", err);
-            throw err;
-          }
-        );
-      })
-      .then((channel) => {
-        this.publishChannel = channel;
-      })
-      .then(() => {
-        return Promise.each(this.tasks, (queue) => {
-          return this.assertQueue(`${this.name}.${queue}`);
-        });
-      })
-      .return();
+    try {
+      this.connection = await amqp.connect(url, {});
+      this.channel = await this.connection.createChannel();
+      this.publishChannel = await this.connection.createConfirmChannel();
+
+      for (const queue of this.tasks) {
+        await this.assertQueue(`${this.name}.${queue}`);
+      }
+    } catch (err: unknown) {
+      console.error("connect error", err);
+      throw err;
+    }
   }
 
-  consume(): Promise<void> {
+  async consume(): Promise<void> {
     const subscriptions = this.subscriptions;
     this.subscriptions = new Map();
     const channel = this.channel;
-    return Promise.map(subscriptions.keys(), (queue) => {
-      const handler = subscriptions.get(queue);
+    if (!channel) {
+      throw new Error("Channel not initialized");
+    }
+    for (const [queue, handler] of subscriptions) {
       if (this.consuming.has(queue)) {
         console.log(`already consuming queue ${queue}`);
-        return;
+        continue;
       }
-      const wrapper = (msg: amqp.Message): void => {
-        let job;
+      const wrapper = (msg: amqp.ConsumeMessage | null): void => {
+        if (!msg) return;
+        let job: any;
         const jobMeta = msg.properties || {};
         try {
           job = JSON.parse(`${msg.content}`);
-        } catch (err) {
+        } catch {
           console.error(`content not valid json`);
           return channel.ack(msg);
         }
@@ -98,60 +83,59 @@ export class RabbitMQ {
           channel.ack(msg);
         });
       };
-      return Promise.resolve(this.channel.consume(queue, wrapper)).then(
-        (consumeInfo) => {
-          this.consuming.set(queue, consumeInfo.consumerTag);
-        }
-      );
-    }).return();
+      const consumeInfo = await channel.consume(queue, wrapper);
+      this.consuming.set(queue, consumeInfo.consumerTag);
+    }
   }
 
-  subscribeToQueue(
+  async subscribeToQueue(
     queue: string,
-    handler: RabbitMessageHandler
+    handler: RabbitMessageHandler,
   ): Promise<void> {
     const queueName = `${this.name}.${queue}`;
-    return Promise.try(() => {
-      this.subscriptions.set(queueName, handler);
-      this.subscribed.add(`queue:::${queueName}`);
-    });
+    this.subscriptions.set(queueName, handler);
+    this.subscribed.add(`queue:::${queueName}`);
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  publishTask(queue: string, content: object): Promise<void> {
-    return Promise.try(() => {
-      const queueName = `${this.name}.${queue}`;
-      const payload = Buffer.from(JSON.stringify({}));
-      return Promise.resolve(
-        this.publishChannel.sendToQueue(queueName, payload)
-      ).return();
-    });
+  async publishTask(queue: string, content: object): Promise<void> {
+    const queueName = `${this.name}.${queue}`;
+    const payload = Buffer.from(JSON.stringify(content));
+    if (!this.publishChannel) {
+      throw new Error("Publish channel not initialized");
+    }
+    this.publishChannel.sendToQueue(queueName, payload);
   }
 
-  unsubscribe(): Promise<void> {
+  async unsubscribe(): Promise<void> {
     const consuming = this.consuming;
-    return Promise.map(consuming.keys(), (queue) => {
-      const consumerTag = consuming.get(queue);
-      return Promise.resolve(this.channel.cancel(consumerTag)).then(() => {
+    for (const [queue, consumerTag] of consuming) {
+      if (consumerTag && this.channel) {
+        await this.channel.cancel(consumerTag);
         this.consuming.delete(queue);
-      });
-    }).return();
+      }
+    }
   }
 
-  disconnect(): Promise<void> {
-    return Promise.resolve(this.publishChannel.waitForConfirms()).then(() =>
-      Promise.resolve(this.connection.close())
-    );
+  async disconnect(): Promise<void> {
+    if (!this.publishChannel || !this.connection) {
+      return;
+    }
+    await this.publishChannel.waitForConfirms();
+    await this.connection.close();
     // TODO(bkendall): Set clean state after this.
   }
 
-  private assertQueue(queue: string): Promise<void> {
-    return Promise.resolve(this.channel.assertQueue(queue)).return();
+  private async assertQueue(queue: string): Promise<void> {
+    if (!this.channel) {
+      throw new Error("Channel not initialized");
+    }
+    await this.channel.assertQueue(queue);
   }
 
   private setCleanState(): void {
-    delete this.channel;
-    delete this.connection;
+    this.channel = undefined;
+    this.connection = undefined;
+    this.publishChannel = undefined;
     this.subscriptions = new Map();
     this.subscribed = new Set();
     this.consuming = new Map();

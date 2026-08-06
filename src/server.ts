@@ -1,8 +1,8 @@
-import * as Promise from "bluebird";
-import { RabbitMQ } from "./rabbitmq";
-import { PonosWorker, WorkerData, WorkerFunction } from "./worker";
+import { RabbitMQ } from "./rabbitmq.js";
+import { PonosWorker } from "./worker.js";
+import type { WorkerData, WorkerFunction } from "./worker.js";
 
-export { WorkerData, WorkerFunction };
+export type { WorkerData, WorkerFunction };
 
 export class Server {
   // private events: Map<string, Function>;
@@ -23,35 +23,29 @@ export class Server {
     }
   }
 
-  consume(): Promise<void> {
-    return this.rabbitmq.consume().return();
+  async consume(): Promise<void> {
+    await this.rabbitmq.consume();
   }
 
-  start(): Promise<void> {
-    return this.rabbitmq
-      .connect()
-      .then(() => {
-        return this.subscribeAll();
-      })
-      .then(() => {
-        return this.consume();
-      })
-      .catch((err) => {
-        console.error("start error", err);
-        throw err;
-      });
+  async start(): Promise<void> {
+    try {
+      await this.rabbitmq.connect();
+      await this.subscribeAll();
+      await this.consume();
+    } catch (err: unknown) {
+      console.error("start error", err);
+      throw err;
+    }
   }
 
-  stop(): Promise<void> {
-    return this.rabbitmq
-      .unsubscribe()
-      .then(() => {
-        return this.rabbitmq.disconnect();
-      })
-      .catch((err: Error) => {
-        console.error("stop error", err);
-        throw err;
-      });
+  async stop(): Promise<void> {
+    try {
+      await this.rabbitmq.unsubscribe();
+      await this.rabbitmq.disconnect();
+    } catch (err: unknown) {
+      console.error("stop error", err);
+      throw err;
+    }
   }
 
   setTask(queueName: string, task: WorkerFunction): this {
@@ -60,15 +54,20 @@ export class Server {
     return this;
   }
 
-  private subscribeAll(): Promise<void> {
-    return Promise.map(this.tasks.keys(), (queue) => {
-      return this.rabbitmq.subscribeToQueue(
-        queue,
-        (job: WorkerData, jobMeta: object, done: () => void): void => {
-          this.enqueue(queue, this.tasks.get(queue), job, jobMeta, done);
-        }
-      );
-    }).return();
+  private async subscribeAll(): Promise<void> {
+    await Promise.all(
+      Array.from(this.tasks.keys()).map((queue: string) => {
+        return this.rabbitmq.subscribeToQueue(
+          queue,
+          (job: WorkerData, jobMeta: object, done: () => void): void => {
+            const task = this.tasks.get(queue);
+            if (task) {
+              this.enqueue(queue, task, job, jobMeta, done);
+            }
+          },
+        );
+      }),
+    );
   }
 
   private enqueue(
@@ -76,36 +75,42 @@ export class Server {
     worker: WorkerFunction,
     job: WorkerData,
     jobMeta: object,
-    done: () => void
+    done: () => void,
   ): void {
-    this.workQueues.get(name).push(() => {
-      this.runWorker(name, worker, job, jobMeta, done);
+    let queue = this.workQueues.get(name);
+    if (!queue) {
+      queue = [];
+      this.workQueues.set(name, queue);
+    }
+    queue.push(() => {
+      void this.runWorker(name, worker, job, jobMeta, done);
     });
-    if (this.workQueues.get(name).length == 1) {
-      this.workLoop(name);
+    if (queue.length === 1) {
+      void this.workLoop(name);
     }
   }
 
-  private workLoop(name: string): Promise<void> {
-    return Promise.try(() => {
-      const worker = this.workQueues.get(name).pop();
-      if (worker) {
-        worker();
-        this.workLoop(name);
-      }
-    });
+  private async workLoop(name: string): Promise<void> {
+    const queue = this.workQueues.get(name);
+    const worker = queue?.pop();
+    if (worker) {
+      worker();
+      await this.workLoop(name);
+    }
   }
 
-  private runWorker(
+  private async runWorker(
     queueName: string,
     handler: WorkerFunction,
     job: WorkerData,
     jobMeta: object,
-    done: () => void
+    done: () => void,
   ): Promise<void> {
     const worker = PonosWorker.create(0, job, queueName, handler);
-    return worker.run().finally(() => {
+    try {
+      await worker.run();
+    } finally {
       done();
-    });
+    }
   }
 }
