@@ -6,52 +6,182 @@ export type RabbitMessageHandler = (
   done: () => void,
 ) => void;
 
+export interface RabbitMQConnectionConfig {
+  url?: string;
+  protocol?: "amqp" | "amqps";
+  hostname?: string;
+  port?: number;
+  username?: string;
+  password?: string;
+  vhost?: string;
+}
+
 export interface RabbitMQOpts {
-  name: string;
-  tasks: Set<string>;
+  name?: string;
+  tasks?: Iterable<string>;
+  connection?: string | RabbitMQConnectionConfig;
+  prefetch?: number;
+  onError?: (err: Error) => void;
+}
+
+function toError(err: unknown): Error {
+  return err instanceof Error ? err : new Error(String(err));
+}
+
+function parsePort(
+  explicitPort: number | undefined,
+  envPort: string | undefined,
+  protocol: "amqp" | "amqps",
+): number {
+  if (explicitPort !== undefined) {
+    if (
+      !Number.isInteger(explicitPort) ||
+      explicitPort < 1 ||
+      explicitPort > 65535
+    ) {
+      throw new RangeError(`Invalid RabbitMQ port: ${explicitPort}`);
+    }
+    return explicitPort;
+  }
+
+  if (envPort !== undefined && envPort !== "") {
+    const parsed = Number(envPort);
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
+      throw new RangeError(`Invalid RABBITMQ_PORT: ${envPort}`);
+    }
+    return parsed;
+  }
+
+  return protocol === "amqps" ? 5671 : 5672;
+}
+
+function resolveConnectTarget(
+  connectionConfig?: string | RabbitMQConnectionConfig,
+): string | amqp.Options.Connect {
+  if (typeof connectionConfig === "string" && connectionConfig.length > 0) {
+    return connectionConfig;
+  }
+
+  const configObj =
+    typeof connectionConfig === "object" && connectionConfig !== null
+      ? connectionConfig
+      : undefined;
+
+  if (configObj?.url) {
+    return configObj.url;
+  }
+
+  if (!connectionConfig && process.env.RABBITMQ_URL) {
+    return process.env.RABBITMQ_URL;
+  }
+
+  const protocolRaw =
+    configObj?.protocol ?? (process.env.RABBITMQ_PROTOCOL || "amqp");
+  if (protocolRaw !== "amqp" && protocolRaw !== "amqps") {
+    throw new Error(`Unsupported RabbitMQ protocol: ${String(protocolRaw)}`);
+  }
+
+  const hostname =
+    configObj?.hostname ?? (process.env.RABBITMQ_HOSTNAME || "localhost");
+  const port = parsePort(
+    configObj?.port,
+    process.env.RABBITMQ_PORT,
+    protocolRaw,
+  );
+  const vhost = configObj?.vhost ?? (process.env.RABBITMQ_VHOST || "/");
+  const username = configObj?.username ?? (process.env.RABBITMQ_USERNAME || "");
+  const password = configObj?.password ?? (process.env.RABBITMQ_PASSWORD || "");
+
+  const options: amqp.Options.Connect = {
+    protocol: protocolRaw,
+    hostname,
+    port,
+    vhost,
+  };
+
+  if (username) {
+    options.username = username;
+    options.password = password;
+  }
+
+  return options;
 }
 
 export class RabbitMQ {
+  private assertedQueues: Set<string> = new Set();
   private channel?: amqp.Channel;
+  private closing = false;
+  private connectTarget: string | amqp.Options.Connect;
   private connection?: amqp.ChannelModel;
   private consuming: Map<string, string> = new Map();
-
-  private hostname: string;
   private name: string;
-  private password: string;
-  private port: number;
+  private onError: (err: Error) => void;
+  private prefetchCount: number;
   private publishChannel?: amqp.ConfirmChannel;
   private subscribed: Set<string> = new Set();
   private subscriptions: Map<string, RabbitMessageHandler> = new Map();
   private tasks: Set<string>;
-  private username: string;
 
   constructor(opts: RabbitMQOpts) {
     this.name = opts.name || "ponos";
-    this.hostname = process.env.RABBITMQ_HOSTNAME || "localhost";
-    this.port = 5672;
-    this.username = process.env.RABBITMQ_USERNAME || "";
-    this.password = process.env.RABBITMQ_PASSWORD || "";
-    this.tasks = opts.tasks || new Set();
+    this.tasks = new Set(opts.tasks ?? []);
+
+    const prefetch = opts.prefetch ?? 1;
+    if (!Number.isInteger(prefetch) || prefetch < 1) {
+      throw new RangeError(
+        `prefetch must be a positive integer, received ${prefetch}`,
+      );
+    }
+    this.prefetchCount = prefetch;
+    this.connectTarget = resolveConnectTarget(opts.connection);
+    this.onError =
+      opts.onError ??
+      ((err: Error): void => {
+        console.error("RabbitMQ error", err);
+      });
+
     this.setCleanState();
   }
 
   async connect(): Promise<void> {
-    let authString = "";
-    if (this.username && this.password) {
-      authString = `${this.username}:${this.password}@`;
-    }
-    const url = `amqp://${authString}${this.hostname}:${this.port}`;
-    console.log(url);
     try {
-      this.connection = await amqp.connect(url, {});
+      this.connection = await amqp.connect(this.connectTarget, {});
+      this.connection.on("error", (err: unknown) => {
+        this.onError(toError(err));
+      });
+      this.connection.on("close", () => {
+        if (!this.closing) {
+          this.onError(new Error("RabbitMQ connection closed unexpectedly"));
+        }
+        this.setCleanState();
+      });
+
       this.channel = await this.connection.createChannel();
+      this.channel.on("error", (err: unknown) => {
+        this.onError(toError(err));
+      });
+      await this.channel.prefetch(this.prefetchCount);
+
       this.publishChannel = await this.connection.createConfirmChannel();
+      this.publishChannel.on("error", (err: unknown) => {
+        this.onError(toError(err));
+      });
 
       for (const queue of this.tasks) {
         await this.assertQueue(`${this.name}.${queue}`);
       }
     } catch (err: unknown) {
+      if (this.connection) {
+        this.closing = true;
+        try {
+          await this.connection.close();
+        } catch {
+          // Ignore close errors while cleaning up a failed connect attempt.
+        } finally {
+          this.closing = false;
+        }
+      }
+      this.setCleanState();
       console.error("connect error", err);
       throw err;
     }
@@ -117,22 +247,36 @@ export class RabbitMQ {
   }
 
   async disconnect(): Promise<void> {
-    if (!this.publishChannel || !this.connection) {
+    if (!this.connection) {
+      this.setCleanState();
       return;
     }
-    await this.publishChannel.waitForConfirms();
-    await this.connection.close();
-    // TODO(bkendall): Set clean state after this.
+
+    this.closing = true;
+    try {
+      if (this.publishChannel) {
+        await this.publishChannel.waitForConfirms();
+      }
+      await this.connection.close();
+    } finally {
+      this.closing = false;
+      this.setCleanState();
+    }
   }
 
   private async assertQueue(queue: string): Promise<void> {
     if (!this.channel) {
       throw new Error("Channel not initialized");
     }
+    if (this.assertedQueues.has(queue)) {
+      return;
+    }
     await this.channel.assertQueue(queue);
+    this.assertedQueues.add(queue);
   }
 
   private setCleanState(): void {
+    this.assertedQueues = new Set();
     this.channel = undefined;
     this.connection = undefined;
     this.publishChannel = undefined;
