@@ -1,9 +1,14 @@
 import amqp from "amqplib";
 
+export interface MessageActions {
+  ack: () => void;
+  nack: (requeue?: boolean) => void;
+}
+
 export type RabbitMessageHandler = (
   job: any,
-  jobMeta: object,
-  done: () => void,
+  jobMeta: Partial<amqp.MessageProperties>,
+  actions: MessageActions,
 ) => void;
 
 export interface RabbitMQConnectionConfig {
@@ -143,6 +148,10 @@ export class RabbitMQ {
     this.setCleanState();
   }
 
+  registerTask(queue: string): void {
+    this.tasks.add(queue);
+  }
+
   async connect(): Promise<void> {
     try {
       this.connection = await amqp.connect(this.connectTarget, {});
@@ -199,19 +208,36 @@ export class RabbitMQ {
         console.log(`already consuming queue ${queue}`);
         continue;
       }
+      await this.assertQueue(queue);
       const wrapper = (msg: amqp.ConsumeMessage | null): void => {
         if (!msg) return;
+
+        let settled = false;
+        const actions: MessageActions = {
+          ack: () => {
+            if (settled) return;
+            settled = true;
+            channel.ack(msg);
+          },
+          nack: (requeue = false) => {
+            if (settled) return;
+            settled = true;
+            channel.nack(msg, false, requeue);
+          },
+        };
+
         let job: any;
         const jobMeta = msg.properties || {};
         try {
-          job = JSON.parse(`${msg.content}`);
-        } catch {
-          console.error(`content not valid json`);
-          return channel.ack(msg);
+          job = JSON.parse(msg.content.toString("utf8"));
+        } catch (err: unknown) {
+          this.onError(
+            new Error(`Invalid JSON payload on queue ${queue}`, { cause: err }),
+          );
+          actions.nack(false);
+          return;
         }
-        handler(job, jobMeta, () => {
-          channel.ack(msg);
-        });
+        handler(job, jobMeta, actions);
       };
       const consumeInfo = await channel.consume(queue, wrapper);
       this.consuming.set(queue, consumeInfo.consumerTag);

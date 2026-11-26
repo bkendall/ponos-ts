@@ -1,21 +1,43 @@
 import { RabbitMQ } from "./rabbitmq.js";
+import type { MessageActions, RabbitMQConnectionConfig } from "./rabbitmq.js";
 import { PonosWorker } from "./worker.js";
 import type { WorkerData, WorkerFunction } from "./worker.js";
 
+export type { MessageActions, RabbitMQConnectionConfig };
 export type { WorkerData, WorkerFunction };
+
+export interface ServerOptions {
+  name?: string;
+  rabbitmq?: string | RabbitMQConnectionConfig;
+  prefetch?: number;
+  onError?: (err: Error) => void;
+}
 
 export class Server {
   // private events: Map<string, Function>;
+  private onError: (err: Error) => void;
   private rabbitmq: RabbitMQ;
+  private subscribedQueues: Set<string> = new Set();
   private tasks: Map<string, WorkerFunction>;
   private workQueues: Map<string, (() => void)[]>;
 
-  constructor(tasks: Map<string, WorkerFunction>) {
+  constructor(
+    tasks: Map<string, WorkerFunction> = new Map(),
+    options: ServerOptions = {},
+  ) {
     this.workQueues = new Map();
     this.tasks = tasks;
+    this.onError =
+      options.onError ??
+      ((err: Error): void => {
+        console.error("Server error", err);
+      });
     this.rabbitmq = new RabbitMQ({
-      name: "ponos",
-      tasks: new Set([...this.tasks.keys()]),
+      name: options.name ?? "ponos",
+      tasks: this.tasks.keys(),
+      connection: options.rabbitmq,
+      prefetch: options.prefetch,
+      onError: this.onError,
     });
 
     for (const [queue, fn] of this.tasks) {
@@ -24,13 +46,13 @@ export class Server {
   }
 
   async consume(): Promise<void> {
+    await this.subscribeAll();
     await this.rabbitmq.consume();
   }
 
   async start(): Promise<void> {
     try {
       await this.rabbitmq.connect();
-      await this.subscribeAll();
       await this.consume();
     } catch (err: unknown) {
       console.error("start error", err);
@@ -41,6 +63,7 @@ export class Server {
   async stop(): Promise<void> {
     try {
       await this.rabbitmq.unsubscribe();
+      this.subscribedQueues.clear();
       await this.rabbitmq.disconnect();
     } catch (err: unknown) {
       console.error("stop error", err);
@@ -49,23 +72,35 @@ export class Server {
   }
 
   setTask(queueName: string, task: WorkerFunction): this {
-    this.workQueues.set(queueName, []);
+    if (!this.workQueues.has(queueName)) {
+      this.workQueues.set(queueName, []);
+    }
     this.tasks.set(queueName, task);
+    this.rabbitmq.registerTask(queueName);
     return this;
   }
 
   private async subscribeAll(): Promise<void> {
+    const pendingQueues = Array.from(this.tasks.keys()).filter(
+      (queue: string) => !this.subscribedQueues.has(queue),
+    );
     await Promise.all(
-      Array.from(this.tasks.keys()).map((queue: string) => {
-        return this.rabbitmq.subscribeToQueue(
+      pendingQueues.map(async (queue: string) => {
+        await this.rabbitmq.subscribeToQueue(
           queue,
-          (job: WorkerData, jobMeta: object, done: () => void): void => {
+          (job: WorkerData, jobMeta: object, actions: MessageActions): void => {
             const task = this.tasks.get(queue);
-            if (task) {
-              this.enqueue(queue, task, job, jobMeta, done);
+            if (!task) {
+              this.onError(
+                new Error(`No task handler registered for queue "${queue}"`),
+              );
+              actions.nack(false);
+              return;
             }
+            this.enqueue(queue, task, job, jobMeta, actions);
           },
         );
+        this.subscribedQueues.add(queue);
       }),
     );
   }
@@ -75,7 +110,7 @@ export class Server {
     worker: WorkerFunction,
     job: WorkerData,
     jobMeta: object,
-    done: () => void,
+    actions: MessageActions,
   ): void {
     let queue = this.workQueues.get(name);
     if (!queue) {
@@ -83,7 +118,7 @@ export class Server {
       this.workQueues.set(name, queue);
     }
     queue.push(() => {
-      void this.runWorker(name, worker, job, jobMeta, done);
+      void this.runWorker(name, worker, job, jobMeta, actions);
     });
     if (queue.length === 1) {
       void this.workLoop(name);
@@ -104,13 +139,15 @@ export class Server {
     handler: WorkerFunction,
     job: WorkerData,
     jobMeta: object,
-    done: () => void,
+    actions: MessageActions,
   ): Promise<void> {
     const worker = PonosWorker.create(0, job, queueName, handler);
     try {
       await worker.run();
-    } finally {
-      done();
+      actions.ack();
+    } catch (err: unknown) {
+      this.onError(err instanceof Error ? err : new Error(String(err)));
+      actions.nack(false);
     }
   }
 }

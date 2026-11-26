@@ -314,18 +314,37 @@ describe("RabbitMQ", () => {
       );
     });
 
-    it("should invoke handler on valid JSON message and ack on done", async () => {
+    it("should assert newly registered tasks before consuming", async () => {
+      const rmq = new RabbitMQ({ name: "test", tasks: new Set() });
+      await rmq.connect();
+      sinon.assert.notCalled(fakeChannel.assertQueue);
+
+      (rmq as any).registerTask("late-queue");
+      await rmq.subscribeToQueue("late-queue", sandbox.stub());
+      await rmq.consume();
+
+      sinon.assert.calledOnceWithExactly(
+        fakeChannel.assertQueue,
+        "test.late-queue",
+      );
+      sinon.assert.calledOnce(fakeChannel.consume);
+      sinon.assert.calledWith(fakeChannel.consume, "test.late-queue");
+    });
+
+    it("should invoke handler on valid JSON message with idempotent ack/nack actions", async () => {
       const rmq = new RabbitMQ({ name: "test", tasks: new Set() });
       await rmq.connect();
 
       let consumerCallback: Function | null = null;
-      fakeChannel.consume.callsFake((queue: string, cb: Function) => {
+      fakeChannel.consume.callsFake((_queue: string, cb: Function) => {
         consumerCallback = cb;
         return Promise.resolve({ consumerTag: "tag-1" });
       });
 
-      const handler = sandbox.stub().callsFake((job, jobMeta, done) => {
-        done();
+      const handler = sandbox.stub().callsFake((_job, _jobMeta, actions) => {
+        actions.ack();
+        actions.ack();
+        actions.nack(true);
       });
 
       await rmq.subscribeToQueue("my-queue", handler);
@@ -344,8 +363,42 @@ describe("RabbitMQ", () => {
         { foo: "bar" },
         { correlationId: "123" },
       );
-      sinon.assert.calledOnce(fakeChannel.ack);
-      sinon.assert.calledWith(fakeChannel.ack, fakeMsg);
+      sinon.assert.calledOnceWithExactly(fakeChannel.ack, fakeMsg);
+      sinon.assert.notCalled(fakeChannel.nack);
+    });
+
+    it("should support nack(requeue) via actions and ignore subsequent ack", async () => {
+      const rmq = new RabbitMQ({ name: "test", tasks: new Set() });
+      await rmq.connect();
+
+      let consumerCallback: Function | null = null;
+      fakeChannel.consume.callsFake((_queue: string, cb: Function) => {
+        consumerCallback = cb;
+        return Promise.resolve({ consumerTag: "tag-1" });
+      });
+
+      const handler = sandbox.stub().callsFake((_job, _jobMeta, actions) => {
+        actions.nack(true);
+        actions.ack();
+      });
+
+      await rmq.subscribeToQueue("my-queue", handler);
+      await rmq.consume();
+
+      const fakeMsg = {
+        content: Buffer.from(JSON.stringify({ foo: "bar" })),
+        properties: {},
+      };
+
+      consumerCallback!(fakeMsg);
+
+      sinon.assert.calledOnceWithExactly(
+        fakeChannel.nack,
+        fakeMsg,
+        false,
+        true,
+      );
+      sinon.assert.notCalled(fakeChannel.ack);
     });
 
     it("should ignore null messages in consume wrapper", async () => {
@@ -353,7 +406,7 @@ describe("RabbitMQ", () => {
       await rmq.connect();
 
       let consumerCallback: Function | null = null;
-      fakeChannel.consume.callsFake((queue: string, cb: Function) => {
+      fakeChannel.consume.callsFake((_queue: string, cb: Function) => {
         consumerCallback = cb;
         return Promise.resolve({ consumerTag: "tag-1" });
       });
@@ -363,15 +416,16 @@ describe("RabbitMQ", () => {
 
       consumerCallback!(null);
       sinon.assert.notCalled(fakeChannel.ack);
+      sinon.assert.notCalled(fakeChannel.nack);
     });
 
-    it("should ack and log error when message content is not valid JSON", async () => {
-      sandbox.stub(console, "error");
-      const rmq = new RabbitMQ({ name: "test", tasks: new Set() });
+    it("should nack without requeue and notify onError when message content is not valid JSON", async () => {
+      const onError = sandbox.stub();
+      const rmq = new RabbitMQ({ name: "test", tasks: new Set(), onError });
       await rmq.connect();
 
       let consumerCallback: Function | null = null;
-      fakeChannel.consume.callsFake((queue: string, cb: Function) => {
+      fakeChannel.consume.callsFake((_queue: string, cb: Function) => {
         consumerCallback = cb;
         return Promise.resolve({ consumerTag: "tag-1" });
       });
@@ -386,8 +440,17 @@ describe("RabbitMQ", () => {
 
       consumerCallback!(fakeMsg);
 
-      sinon.assert.calledOnce(fakeChannel.ack);
-      sinon.assert.calledWith(fakeChannel.ack, fakeMsg);
+      sinon.assert.calledOnce(onError);
+      expect(onError.firstCall.args[0].message).to.include(
+        "Invalid JSON payload",
+      );
+      sinon.assert.calledOnceWithExactly(
+        fakeChannel.nack,
+        fakeMsg,
+        false,
+        false,
+      );
+      sinon.assert.notCalled(fakeChannel.ack);
     });
   });
 
