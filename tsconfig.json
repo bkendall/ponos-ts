@@ -7,6 +7,8 @@
     "rootDir": "src",
     "outDir": "lib",
     "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
     "strict": true,
     "esModuleInterop": true,
     "types": ["node"]

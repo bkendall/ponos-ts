@@ -8,7 +8,9 @@ describe("Simple Example", () => {
   let server: Server;
   let rabbitmq: RabbitMQ;
   const jobEmitter: EventEmitter = new EventEmitter();
-  const basicWorker: WorkerFunction = async (_job: WorkerData): Promise<void> => {
+  const basicWorker: WorkerFunction = async (
+    _job: WorkerData,
+  ): Promise<void> => {
     console.log("worker got it");
     jobEmitter.emit("done");
   };
@@ -44,5 +46,3 @@ describe("Simple Example", () => {
     }
   });
 });
-
-

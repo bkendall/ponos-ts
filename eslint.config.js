@@ -5,11 +5,17 @@ import eslintConfigPrettier from "eslint-config-prettier";
 
 export default [
   {
-    files: ["src/**/*.ts", "test/**/*.ts", "test-functional/**/*.ts", "example/**/*.ts"],
+    files: [
+      "src/**/*.ts",
+      "test/**/*.ts",
+      "test-functional/**/*.ts",
+      "example/**/*.ts",
+      "resources/**/*.ts",
+    ],
     languageOptions: {
       parser: typescriptParser,
       parserOptions: {
-        project: "./tsconfig.json",
+        project: "./tsconfig.check.json",
       },
     },
     plugins: {
@@ -21,6 +27,16 @@ export default [
       ...eslintConfigPrettier.rules,
       "prettier/prettier": "error",
       "@typescript-eslint/no-explicit-any": "off",
+      "@typescript-eslint/no-unused-vars": [
+        "error",
+        { argsIgnorePattern: "^_", varsIgnorePattern: "^_" },
+      ],
+    },
+  },
+  {
+    files: ["test/**/*.ts", "test-functional/**/*.ts"],
+    rules: {
+      "@typescript-eslint/no-unused-expressions": "off",
     },
   },
 ];
