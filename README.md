@@ -12,10 +12,10 @@
 ## Features
 
 - **Typed Task Handlers**: Full TypeScript support with clean types (`WorkerFunction`, `WorkerData`).
-- **Sequential Queue Processing**: In-memory task queuing ensures predictable worker execution.
-- **Automated Acking & Dead-Letter Nacking**: Handlers automatically acknowledge completed messages and `nack(false)` malformed JSON or unhandled failures so dead-letter exchanges can capture them.
-- **Built-in Timeout & Retries**: Automatic execution timeouts and retry mechanism for task resilience.
-- **Graceful Shutdown**: Effortless queue unsubscription and clean RabbitMQ connection termination.
+- **Awaited FIFO Queue Processing**: Jobs run sequentially in FIFO order by default (or up to configured per-queue `concurrency`) with matching RabbitMQ `prefetch`.
+- **Automated Acking & Dead-Letter Nacking**: Handlers automatically acknowledge completed messages and `nack(false)` malformed JSON, exhausted retries, or `TaskFatalError` failures so dead-letter exchanges can capture them.
+- **Bounded Timeout & Exponential Retries**: Configurable task timeout with `AbortSignal` (default `30_000ms`), capped exponential backoff (`maxRetries: 3`), and `TaskFatalError` for non-retryable failures.
+- **Graceful Shutdown**: Unsubscribes consumers, requeues unstarted buffered jobs, awaits in-flight workers so they can settle cleanly, and closes the RabbitMQ connection.
 - **Flexible Configuration**: Programmatic `ServerOptions` (URL or structured `amqp`/`amqps` connection config, `prefetch`, `onError`) and environment-based RabbitMQ setup (`RABBITMQ_URL`, `RABBITMQ_PROTOCOL`, `RABBITMQ_HOSTNAME`, `RABBITMQ_PORT`, `RABBITMQ_USERNAME`, `RABBITMQ_PASSWORD`, `RABBITMQ_VHOST`).
 
 ---
@@ -96,7 +96,7 @@ Ponos automatically reads RabbitMQ connection options from environment variables
 The core class responsible for managing tasks and RabbitMQ queue consumption.
 
 #### `constructor(tasks?: Map<string, WorkerFunction>, options?: ServerOptions)`
-Creates a new server instance with an optional queue-to-worker map and configuration options (`name`, `rabbitmq`, `prefetch`, `onError`).
+Creates a new server instance with an optional queue-to-worker map and configuration options (`name`, `rabbitmq`, `prefetch`, `concurrency`, `taskTimeoutMs`, `maxRetries`, `initialRetryDelayMs`, `maxRetryDelayMs`, `onError`).
 
 #### `server.start(): Promise<void>`
 Connects to RabbitMQ, applies channel `prefetch`, asserts required queues, subscribes all handlers, and starts consuming messages.
@@ -105,14 +105,14 @@ Connects to RabbitMQ, applies channel `prefetch`, asserts required queues, subsc
 Subscribes any newly registered tasks and starts consuming messages on them.
 
 #### `server.stop(): Promise<void>`
-Unsubscribes from active consumer queues, waits for publisher confirms, and closes the RabbitMQ connection cleanly.
+Unsubscribes from active consumer queues, requeues (`nack(true)`) unstarted buffered messages, awaits in-flight workers so they settle cleanly, waits for publisher confirms, and closes the RabbitMQ connection.
 
 #### `server.setTask(queueName: string, task: WorkerFunction): this`
 Dynamically registers or updates a worker function for a specific queue name. When called after `start()`, invoke `await server.consume()` to assert and start consuming the new queue.
 
 ---
 
-### Types
+### Types & Errors
 
 #### `ServerOptions`
 ```typescript
@@ -120,6 +120,11 @@ interface ServerOptions {
   name?: string;
   rabbitmq?: string | RabbitMQConnectionConfig;
   prefetch?: number;
+  concurrency?: number;
+  taskTimeoutMs?: number;
+  maxRetries?: number;
+  initialRetryDelayMs?: number;
+  maxRetryDelayMs?: number;
   onError?: (err: Error) => void;
 }
 ```
@@ -145,10 +150,31 @@ interface WorkerData {
 }
 ```
 
+#### `WorkerContext`
+Metadata and cancellation signal passed as the second argument to handlers:
+```typescript
+interface WorkerContext {
+  attempt: number;
+  signal: AbortSignal;
+  jobMeta?: Record<string, unknown>;
+}
+```
+
 #### `WorkerFunction`
 The signature required for task handler functions:
 ```typescript
-type WorkerFunction = (data: WorkerData) => Promise<unknown> | PromiseLike<unknown>;
+type WorkerFunction = (
+  data: WorkerData,
+  context: WorkerContext,
+) => Promise<unknown> | PromiseLike<unknown>;
+```
+
+#### `TaskFatalError`
+Throw `TaskFatalError` inside a worker handler to fail immediately without retries and `nack(false)` the message:
+```typescript
+import { TaskFatalError } from "ponos-ts";
+
+throw new TaskFatalError("Unrecoverable payload error");
 ```
 
 ---
