@@ -13,10 +13,10 @@
 
 - **Typed Task Handlers**: Full TypeScript support with clean types (`WorkerFunction`, `WorkerData`).
 - **Sequential Queue Processing**: In-memory task queuing ensures predictable worker execution.
-- **Automated Acking**: Handlers automatically acknowledge messages upon completion or queue failure recovery.
+- **Automated Acking & Dead-Letter Nacking**: Handlers automatically acknowledge completed messages and `nack(false)` malformed JSON or unhandled failures so dead-letter exchanges can capture them.
 - **Built-in Timeout & Retries**: Automatic execution timeouts and retry mechanism for task resilience.
 - **Graceful Shutdown**: Effortless queue unsubscription and clean RabbitMQ connection termination.
-- **Simple Configuration**: Environment-based RabbitMQ setup (`RABBITMQ_HOSTNAME`, `RABBITMQ_USERNAME`, `RABBITMQ_PASSWORD`).
+- **Flexible Configuration**: Programmatic `ServerOptions` (URL or structured `amqp`/`amqps` connection config, `prefetch`, `onError`) and environment-based RabbitMQ setup (`RABBITMQ_URL`, `RABBITMQ_PROTOCOL`, `RABBITMQ_HOSTNAME`, `RABBITMQ_PORT`, `RABBITMQ_USERNAME`, `RABBITMQ_PASSWORD`, `RABBITMQ_VHOST`).
 
 ---
 
@@ -73,15 +73,19 @@ process.on("SIGINT", async () => {
 
 ## Environment Configuration
 
-Ponos automatically reads RabbitMQ connection options from environment variables:
+Ponos automatically reads RabbitMQ connection options from environment variables when `options.rabbitmq` is not passed:
 
 | Variable | Description | Default |
 | :--- | :--- | :--- |
+| `RABBITMQ_URL` | Full AMQP/AMQPS connection URI (overrides discrete env vars) | `undefined` |
+| `RABBITMQ_PROTOCOL` | Connection protocol (`amqp` or `amqps`) | `amqp` |
 | `RABBITMQ_HOSTNAME` | Hostname of the RabbitMQ server | `localhost` |
+| `RABBITMQ_PORT` | Broker port (`1–65535`) | `5672` (`5671` for `amqps`) |
 | `RABBITMQ_USERNAME` | Username for RabbitMQ authentication | `""` (none) |
 | `RABBITMQ_PASSWORD` | Password for RabbitMQ authentication | `""` (none) |
+| `RABBITMQ_VHOST` | RabbitMQ virtual host | `/` |
 
-*Note: Ponos connects over default AMQP port `5672` and prefixes queue names with `ponos.<queue-name>`.*
+*Note: By default Ponos prefixes queue names with `ponos.<queue-name>` (configurable via `options.name`) and sets channel `prefetch` to `1`.*
 
 ---
 
@@ -91,21 +95,47 @@ Ponos automatically reads RabbitMQ connection options from environment variables
 
 The core class responsible for managing tasks and RabbitMQ queue consumption.
 
-#### `constructor(tasks: Map<string, WorkerFunction>)`
-Creates a new server instance with the given queue-to-worker map.
+#### `constructor(tasks?: Map<string, WorkerFunction>, options?: ServerOptions)`
+Creates a new server instance with an optional queue-to-worker map and configuration options (`name`, `rabbitmq`, `prefetch`, `onError`).
 
 #### `server.start(): Promise<void>`
-Connects to RabbitMQ, asserts required queues, subscribes all handlers, and starts consuming messages.
+Connects to RabbitMQ, applies channel `prefetch`, asserts required queues, subscribes all handlers, and starts consuming messages.
+
+#### `server.consume(): Promise<void>`
+Subscribes any newly registered tasks and starts consuming messages on them.
 
 #### `server.stop(): Promise<void>`
-Unsubscribes from active consumer queues, waits for confirms, and closes the RabbitMQ connection.
+Unsubscribes from active consumer queues, waits for publisher confirms, and closes the RabbitMQ connection cleanly.
 
 #### `server.setTask(queueName: string, task: WorkerFunction): this`
-Dynamically registers or updates a worker function for a specific queue name.
+Dynamically registers or updates a worker function for a specific queue name. When called after `start()`, invoke `await server.consume()` to assert and start consuming the new queue.
 
 ---
 
 ### Types
+
+#### `ServerOptions`
+```typescript
+interface ServerOptions {
+  name?: string;
+  rabbitmq?: string | RabbitMQConnectionConfig;
+  prefetch?: number;
+  onError?: (err: Error) => void;
+}
+```
+
+#### `RabbitMQConnectionConfig`
+```typescript
+interface RabbitMQConnectionConfig {
+  url?: string;
+  protocol?: "amqp" | "amqps";
+  hostname?: string;
+  port?: number;
+  username?: string;
+  password?: string;
+  vhost?: string;
+}
+```
 
 #### `WorkerData`
 The expected shape of incoming task payloads:
