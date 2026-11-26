@@ -2,10 +2,21 @@ import { EventEmitter } from "events";
 import sinon from "sinon";
 import { expect } from "chai";
 import amqp from "amqplib";
-import { Server } from "../src/server.js";
+import { Server, TaskFatalError } from "../src/server.js";
 import { RabbitMQ } from "../src/rabbitmq.js";
 import type { MessageActions } from "../src/rabbitmq.js";
 import { PonosWorker } from "../src/worker.js";
+import type { WorkerData } from "../src/worker.js";
+
+function createDeferred<T = void>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
 
 describe("Server", () => {
   let sandbox: sinon.SinonSandbox;
@@ -40,12 +51,29 @@ describe("Server", () => {
         expect(server).to.be.an.instanceof(Server);
       });
 
+      it("should validate concurrency and worker options eagerly", () => {
+        expect(() => new Server(new Map(), { concurrency: 0 })).to.throw(
+          RangeError,
+        );
+        expect(() => new Server(new Map(), { concurrency: 1.5 })).to.throw(
+          RangeError,
+        );
+        expect(() => new Server(new Map(), { maxRetries: -1 })).to.throw(
+          RangeError,
+        );
+      });
+
       it("should allow setting tasks via setTask and preserve existing workQueue", () => {
         const taskFn1 = async () => {};
         const taskFn2 = async () => {};
         const server = new Server(new Map([["q2", taskFn1]]));
         const existingQueue = (server as any).workQueues.get("q2");
-        existingQueue.push(() => {});
+        existingQueue.push({
+          handler: taskFn1,
+          job: { message: "queued" },
+          jobMeta: {},
+          actions: { ack: () => {}, nack: () => {} },
+        });
 
         const result = server.setTask("q2", taskFn2);
         expect(result).to.equal(server);
@@ -111,7 +139,7 @@ describe("Server", () => {
     });
 
     describe("queue message handling & execution", () => {
-      it("should process enqueued job via PonosWorker and call ack", async () => {
+      it("should process enqueued job via PonosWorker with options and call ack", async () => {
         let subscribeCallback:
           | ((job: any, jobMeta: object, actions: MessageActions) => void)
           | null = null;
@@ -128,7 +156,12 @@ describe("Server", () => {
         sandbox.stub(PonosWorker, "create").returns(workerInstance as any);
 
         const taskHandler = sandbox.stub().resolves();
-        const server = new Server(new Map([["q1", taskHandler]]));
+        const server = new Server(new Map([["q1", taskHandler]]), {
+          taskTimeoutMs: 5000,
+          maxRetries: 2,
+          initialRetryDelayMs: 250,
+          maxRetryDelayMs: 2000,
+        });
 
         await server.start();
 
@@ -137,19 +170,26 @@ describe("Server", () => {
           nack: sandbox.stub(),
         };
         const jobData = { message: "hello" };
-        const jobMeta = {};
+        const jobMeta = { correlationId: "c-1" };
 
         subscribeCallback!(jobData, jobMeta, actions);
 
         await new Promise((resolve) => setTimeout(resolve, 10));
 
         sinon.assert.calledOnce(PonosWorker.create as sinon.SinonStub);
-        sinon.assert.calledWith(
+        sinon.assert.calledWithExactly(
           PonosWorker.create as sinon.SinonStub,
           0,
           jobData,
           "q1",
           taskHandler,
+          {
+            taskTimeoutMs: 5000,
+            maxRetries: 2,
+            initialRetryDelayMs: 250,
+            maxRetryDelayMs: 2000,
+            jobMeta,
+          },
         );
         sinon.assert.calledOnce(workerInstance.run);
         sinon.assert.calledOnce(actions.ack as sinon.SinonStub);
@@ -248,6 +288,256 @@ describe("Server", () => {
         await new Promise((resolve) => setTimeout(resolve, 10));
         sinon.assert.calledOnce(actions.ack as sinon.SinonStub);
       });
+
+      it("should process jobs strictly sequentially in FIFO order when concurrency is 1", async () => {
+        let subscribeCallback:
+          | ((job: any, jobMeta: object, actions: MessageActions) => void)
+          | null = null;
+        (RabbitMQ.prototype.subscribeToQueue as sinon.SinonStub).callsFake(
+          (_queue: string, cb: any) => {
+            subscribeCallback = cb;
+            return Promise.resolve();
+          },
+        );
+
+        const events: string[] = [];
+        const gates: Record<string, ReturnType<typeof createDeferred>> = {
+          j1: createDeferred(),
+          j2: createDeferred(),
+          j3: createDeferred(),
+        };
+
+        const server = new Server(
+          new Map([
+            [
+              "fifo-q",
+              async (job: WorkerData) => {
+                events.push(`${job.message}-start`);
+                await gates[job.message].promise;
+                events.push(`${job.message}-end`);
+              },
+            ],
+          ]),
+        );
+
+        await server.start();
+
+        const makeActions = (): MessageActions => ({
+          ack: sandbox.stub(),
+          nack: sandbox.stub(),
+        });
+        const a1 = makeActions();
+        const a2 = makeActions();
+        const a3 = makeActions();
+
+        subscribeCallback!({ message: "j1" }, {}, a1);
+        subscribeCallback!({ message: "j2" }, {}, a2);
+        subscribeCallback!({ message: "j3" }, {}, a3);
+
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        expect(events).to.deep.equal(["j1-start"]);
+        sinon.assert.notCalled(a1.ack as sinon.SinonStub);
+
+        gates.j1.resolve();
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        expect(events).to.deep.equal(["j1-start", "j1-end", "j2-start"]);
+        sinon.assert.calledOnce(a1.ack as sinon.SinonStub);
+
+        gates.j2.resolve();
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        expect(events).to.deep.equal([
+          "j1-start",
+          "j1-end",
+          "j2-start",
+          "j2-end",
+          "j3-start",
+        ]);
+        sinon.assert.calledOnce(a2.ack as sinon.SinonStub);
+
+        gates.j3.resolve();
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        expect(events).to.deep.equal([
+          "j1-start",
+          "j1-end",
+          "j2-start",
+          "j2-end",
+          "j3-start",
+          "j3-end",
+        ]);
+        sinon.assert.calledOnce(a3.ack as sinon.SinonStub);
+      });
+
+      it("should enforce bounded concurrency > 1", async () => {
+        let subscribeCallback:
+          | ((job: any, jobMeta: object, actions: MessageActions) => void)
+          | null = null;
+        (RabbitMQ.prototype.subscribeToQueue as sinon.SinonStub).callsFake(
+          (_queue: string, cb: any) => {
+            subscribeCallback = cb;
+            return Promise.resolve();
+          },
+        );
+
+        const started: string[] = [];
+        const gates: Record<string, ReturnType<typeof createDeferred>> = {
+          j1: createDeferred(),
+          j2: createDeferred(),
+          j3: createDeferred(),
+        };
+
+        const server = new Server(
+          new Map([
+            [
+              "conc-q",
+              async (job: WorkerData) => {
+                started.push(job.message);
+                await gates[job.message].promise;
+              },
+            ],
+          ]),
+          { concurrency: 2 },
+        );
+
+        await server.start();
+
+        const actions = () => ({ ack: sandbox.stub(), nack: sandbox.stub() });
+        subscribeCallback!({ message: "j1" }, {}, actions());
+        subscribeCallback!({ message: "j2" }, {}, actions());
+        subscribeCallback!({ message: "j3" }, {}, actions());
+
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        expect(started).to.deep.equal(["j1", "j2"]);
+
+        gates.j1.resolve();
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        expect(started).to.deep.equal(["j1", "j2", "j3"]);
+
+        gates.j2.resolve();
+        gates.j3.resolve();
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      });
+
+      it("should drain in-flight jobs and requeue buffered jobs before disconnecting on stop()", async () => {
+        let subscribeCallback:
+          | ((job: any, jobMeta: object, actions: MessageActions) => void)
+          | null = null;
+        (RabbitMQ.prototype.subscribeToQueue as sinon.SinonStub).callsFake(
+          (_queue: string, cb: any) => {
+            subscribeCallback = cb;
+            return Promise.resolve();
+          },
+        );
+
+        const gate1 = createDeferred();
+        const server = new Server(
+          new Map([
+            [
+              "drain-q",
+              async () => {
+                await gate1.promise;
+              },
+            ],
+          ]),
+        );
+
+        await server.start();
+
+        const a1: MessageActions = {
+          ack: sandbox.stub(),
+          nack: sandbox.stub(),
+        };
+        const a2: MessageActions = {
+          ack: sandbox.stub(),
+          nack: sandbox.stub(),
+        };
+        const aLate: MessageActions = {
+          ack: sandbox.stub(),
+          nack: sandbox.stub(),
+        };
+
+        subscribeCallback!({ message: "j1" }, {}, a1);
+        subscribeCallback!({ message: "j2" }, {}, a2);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+
+        const stopPromise = server.stop();
+        await new Promise((resolve) => setTimeout(resolve, 10));
+
+        // Unstarted buffered job should be requeued immediately, while disconnect waits for j1.
+        sinon.assert.calledOnceWithExactly(a2.nack as sinon.SinonStub, true);
+        sinon.assert.notCalled(
+          RabbitMQ.prototype.disconnect as sinon.SinonStub,
+        );
+
+        // Any message delivered mid-stop should also be requeued immediately.
+        subscribeCallback!({ message: "late" }, {}, aLate);
+        sinon.assert.calledOnceWithExactly(aLate.nack as sinon.SinonStub, true);
+
+        gate1.resolve();
+        await stopPromise;
+
+        sinon.assert.calledOnce(a1.ack as sinon.SinonStub);
+        sinon.assert.calledOnce(
+          RabbitMQ.prototype.disconnect as sinon.SinonStub,
+        );
+      });
+
+      it("should nack(false) when retries are exhausted or TaskFatalError is thrown", async () => {
+        let subscribeCallback:
+          | ((job: any, jobMeta: object, actions: MessageActions) => void)
+          | null = null;
+        (RabbitMQ.prototype.subscribeToQueue as sinon.SinonStub).callsFake(
+          (_queue: string, cb: any) => {
+            subscribeCallback = cb;
+            return Promise.resolve();
+          },
+        );
+
+        const onError = sandbox.stub();
+        let calls = 0;
+        const server = new Server(
+          new Map([
+            [
+              "retry-q",
+              async (job: WorkerData) => {
+                calls += 1;
+                if (job.message === "fatal") {
+                  throw new TaskFatalError("fatal");
+                }
+                if (calls === 1) {
+                  throw new Error("transient");
+                }
+              },
+            ],
+          ]),
+          { maxRetries: 1, initialRetryDelayMs: 5, onError },
+        );
+
+        await server.start();
+
+        const transientActions: MessageActions = {
+          ack: sandbox.stub(),
+          nack: sandbox.stub(),
+        };
+        subscribeCallback!({ message: "ok-on-retry" }, {}, transientActions);
+        await new Promise((resolve) => setTimeout(resolve, 30));
+
+        sinon.assert.calledOnce(transientActions.ack as sinon.SinonStub);
+        sinon.assert.notCalled(onError);
+
+        const fatalActions: MessageActions = {
+          ack: sandbox.stub(),
+          nack: sandbox.stub(),
+        };
+        subscribeCallback!({ message: "fatal" }, {}, fatalActions);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+
+        sinon.assert.calledOnceWithExactly(
+          fatalActions.nack as sinon.SinonStub,
+          false,
+        );
+        sinon.assert.calledOnce(onError);
+        expect(onError.firstCall.args[0]).to.be.an.instanceof(TaskFatalError);
+      });
     });
   });
 
@@ -275,6 +565,21 @@ describe("Server", () => {
         close: sandbox.stub().resolves(),
       });
       sandbox.stub(amqp, "connect").resolves(fakeConnection as any);
+    });
+
+    it("should forward ServerOptions to RabbitMQ and default prefetch to concurrency", async () => {
+      const server = new Server(new Map([["invoice", async () => {}]]), {
+        name: "billing",
+        concurrency: 3,
+      });
+
+      await server.start();
+
+      sinon.assert.calledOnceWithExactly(fakeChannel.prefetch, 3);
+      sinon.assert.calledOnceWithExactly(
+        fakeChannel.assertQueue,
+        "billing.invoice",
+      );
     });
 
     it("should forward ServerOptions to RabbitMQ and assert tasks added via setTask before start", async () => {
