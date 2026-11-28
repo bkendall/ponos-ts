@@ -193,6 +193,7 @@ describe("Server", () => {
             initialRetryDelayMs: 250,
             maxRetryDelayMs: 2000,
             jobMeta,
+            onRetry: sinon.match.func as any,
           },
         );
         sinon.assert.calledOnce(workerInstance.run);
@@ -642,6 +643,77 @@ describe("Server", () => {
       );
       sinon.assert.calledTwice(fakeChannel.consume);
       sinon.assert.calledWith(fakeChannel.consume.secondCall, "ponos.dynamic");
+    });
+  });
+
+  describe("pluggable logger", () => {
+    it("should log start/stop errors, default onError, and retry warnings via custom logger", async () => {
+      const consoleErrorStub = sandbox.stub(console, "error");
+      const consoleWarnStub = sandbox.stub(console, "warn");
+      const logger = {
+        info: sandbox.stub(),
+        warn: sandbox.stub(),
+        error: sandbox.stub(),
+        debug: sandbox.stub(),
+      };
+
+      const connectErr = new Error("connect fail");
+      const connectStub = sandbox
+        .stub(RabbitMQ.prototype, "connect")
+        .rejects(connectErr);
+      const stopErr = new Error("stop fail");
+      sandbox.stub(RabbitMQ.prototype, "unsubscribe").rejects(stopErr);
+
+      const serverErrTest = new Server(new Map(), { logger });
+      await expect(serverErrTest.start()).to.be.rejectedWith("connect fail");
+      await expect(serverErrTest.stop()).to.be.rejectedWith("stop fail");
+
+      sinon.assert.calledWithExactly(logger.error, "start error", connectErr);
+      sinon.assert.calledWithExactly(logger.error, "stop error", stopErr);
+
+      connectStub.resolves();
+      let subscribeCallback:
+        ((job: any, jobMeta: object, actions: MessageActions) => void) | null =
+        null;
+      sandbox
+        .stub(RabbitMQ.prototype, "subscribeToQueue")
+        .callsFake((_queue: string, cb: any) => {
+          subscribeCallback = cb;
+          return Promise.resolve();
+        });
+      sandbox.stub(RabbitMQ.prototype, "consume").resolves();
+
+      let attempts = 0;
+      const retryServer = new Server(
+        new Map([
+          [
+            "retry-log-q",
+            async () => {
+              attempts += 1;
+              if (attempts === 1) {
+                throw new Error("transient boom");
+              }
+              throw new TaskFatalError("fatal boom");
+            },
+          ],
+        ]),
+        { maxRetries: 1, initialRetryDelayMs: 5, logger },
+      );
+
+      await retryServer.start();
+      const actions: MessageActions = {
+        ack: sandbox.stub(),
+        nack: sandbox.stub(),
+      };
+      subscribeCallback!({ message: "hi" }, {}, actions);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+
+      sinon.assert.calledOnce(logger.warn);
+      expect(logger.warn.firstCall.args[0]).to.include("retry-log-q");
+      expect(logger.error.lastCall.args[0]).to.equal("Server error");
+      expect(logger.error.lastCall.args[1]).to.be.an.instanceof(TaskFatalError);
+      sinon.assert.notCalled(consoleErrorStub);
+      sinon.assert.notCalled(consoleWarnStub);
     });
   });
 });

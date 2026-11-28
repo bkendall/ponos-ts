@@ -1,3 +1,5 @@
+import { resolveLogger } from "./logger.js";
+import type { Logger } from "./logger.js";
 import { RabbitMQ } from "./rabbitmq.js";
 import type { MessageActions, RabbitMQConnectionConfig } from "./rabbitmq.js";
 import {
@@ -26,6 +28,7 @@ export interface ServerOptions {
   initialRetryDelayMs?: number;
   maxRetryDelayMs?: number;
   onError?: (err: Error) => void;
+  logger?: Partial<Logger>;
 }
 
 interface QueuedJob {
@@ -40,6 +43,7 @@ export class Server {
   private activeCounts: Map<string, number> = new Map();
   private concurrency: number;
   private inFlight: Set<Promise<void>> = new Set();
+  private logger: Logger;
   private onError: (err: Error) => void;
   private rabbitmq: RabbitMQ;
   private stopping = false;
@@ -78,10 +82,11 @@ export class Server {
 
     this.workQueues = new Map();
     this.tasks = tasks;
+    this.logger = resolveLogger(options.logger);
     this.onError =
       options.onError ??
       ((err: Error): void => {
-        console.error("Server error", err);
+        this.logger.error("Server error", err);
       });
     this.rabbitmq = new RabbitMQ({
       name: options.name ?? "ponos",
@@ -89,6 +94,7 @@ export class Server {
       connection: options.rabbitmq,
       prefetch: options.prefetch ?? this.concurrency,
       onError: this.onError,
+      logger: this.logger,
     });
 
     for (const [queue, fn] of this.tasks) {
@@ -106,7 +112,7 @@ export class Server {
       await this.rabbitmq.connect();
       await this.consume();
     } catch (err: unknown) {
-      console.error("start error", err);
+      this.logger.error("start error", err);
       throw err;
     }
   }
@@ -130,7 +136,7 @@ export class Server {
 
       await this.rabbitmq.disconnect();
     } catch (err: unknown) {
-      console.error("stop error", err);
+      this.logger.error("stop error", err);
       throw err;
     } finally {
       this.stopping = false;
@@ -237,6 +243,12 @@ export class Server {
     const worker = PonosWorker.create(0, job, queueName, handler, {
       ...this.workerOptions,
       jobMeta: jobMeta as Record<string, unknown>,
+      onRetry: (err: Error, nextAttempt: number, delayMs: number): void => {
+        this.logger.warn(
+          `Retrying task on queue "${queueName}" (attempt ${nextAttempt}) in ${delayMs}ms`,
+          err,
+        );
+      },
     });
     try {
       await worker.run();
