@@ -3,10 +3,11 @@ import sinon from "sinon";
 import { expect } from "chai";
 import amqp from "amqplib";
 import { Server, TaskFatalError } from "../src/server.js";
+import type { TaskDefinition } from "../src/server.js";
 import { RabbitMQ } from "../src/rabbitmq.js";
 import type { MessageActions } from "../src/rabbitmq.js";
 import { PonosWorker } from "../src/worker.js";
-import type { WorkerData } from "../src/worker.js";
+import type { WorkerData, WorkerFunction } from "../src/worker.js";
 
 function createDeferred(): {
   promise: Promise<void>;
@@ -193,6 +194,7 @@ describe("Server", () => {
             initialRetryDelayMs: 250,
             maxRetryDelayMs: 2000,
             jobMeta,
+            onRetry: sinon.match.func as any,
           },
         );
         sinon.assert.calledOnce(workerInstance.run);
@@ -642,6 +644,176 @@ describe("Server", () => {
       );
       sinon.assert.calledTwice(fakeChannel.consume);
       sinon.assert.calledWith(fakeChannel.consume.secondCall, "ponos.dynamic");
+    });
+  });
+
+  describe("pluggable logger", () => {
+    it("should log start/stop errors, default onError, and retry warnings via custom logger", async () => {
+      const consoleErrorStub = sandbox.stub(console, "error");
+      const consoleWarnStub = sandbox.stub(console, "warn");
+      const logger = {
+        info: sandbox.stub(),
+        warn: sandbox.stub(),
+        error: sandbox.stub(),
+        debug: sandbox.stub(),
+      };
+
+      const connectErr = new Error("connect fail");
+      const connectStub = sandbox
+        .stub(RabbitMQ.prototype, "connect")
+        .rejects(connectErr);
+      const stopErr = new Error("stop fail");
+      sandbox.stub(RabbitMQ.prototype, "unsubscribe").rejects(stopErr);
+
+      const serverErrTest = new Server(new Map(), { logger });
+      await expect(serverErrTest.start()).to.be.rejectedWith("connect fail");
+      await expect(serverErrTest.stop()).to.be.rejectedWith("stop fail");
+
+      sinon.assert.calledWithExactly(logger.error, "start error", connectErr);
+      sinon.assert.calledWithExactly(logger.error, "stop error", stopErr);
+
+      connectStub.resolves();
+      let subscribeCallback:
+        ((job: any, jobMeta: object, actions: MessageActions) => void) | null =
+        null;
+      sandbox
+        .stub(RabbitMQ.prototype, "subscribeToQueue")
+        .callsFake((_queue: string, cb: any) => {
+          subscribeCallback = cb;
+          return Promise.resolve();
+        });
+      sandbox.stub(RabbitMQ.prototype, "consume").resolves();
+
+      let attempts = 0;
+      const retryServer = new Server(
+        new Map([
+          [
+            "retry-log-q",
+            async () => {
+              attempts += 1;
+              if (attempts === 1) {
+                throw new Error("transient boom");
+              }
+              throw new TaskFatalError("fatal boom");
+            },
+          ],
+        ]),
+        { maxRetries: 1, initialRetryDelayMs: 5, logger },
+      );
+
+      await retryServer.start();
+      const actions: MessageActions = {
+        ack: sandbox.stub(),
+        nack: sandbox.stub(),
+      };
+      subscribeCallback!({ message: "hi" }, {}, actions);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+
+      sinon.assert.calledOnce(logger.warn);
+      expect(logger.warn.firstCall.args[0]).to.include("retry-log-q");
+      expect(logger.error.lastCall.args[0]).to.equal("Server error");
+      expect(logger.error.lastCall.args[1]).to.be.an.instanceof(TaskFatalError);
+      sinon.assert.notCalled(consoleErrorStub);
+      sinon.assert.notCalled(consoleWarnStub);
+    });
+  });
+
+  describe("typed TaskDefinition & validation integration", () => {
+    it("should reject invalid worker options inside TaskDefinition eagerly on Server/setTask", () => {
+      const badDef: TaskDefinition<{ id: number }> = {
+        task: async () => {},
+        maxRetries: -1,
+      };
+      expect(() => new Server(new Map([["q1", badDef]]))).to.throw(RangeError);
+
+      const server = new Server();
+      expect(() =>
+        server.setTask("q2", { task: async () => {}, taskTimeoutMs: -5 }),
+      ).to.throw(RangeError);
+    });
+
+    it("should support heterogeneous typed queues, per-queue overrides, and fail fast with nack(false) on invalid payload", async () => {
+      interface EmailJob {
+        to: string;
+      }
+      interface ResizeJob {
+        width: number;
+      }
+
+      const callbacks = new Map<
+        string,
+        (job: any, jobMeta: object, actions: MessageActions) => void
+      >();
+      sandbox.stub(RabbitMQ.prototype, "connect").resolves();
+      sandbox.stub(RabbitMQ.prototype, "consume").resolves();
+      sandbox
+        .stub(RabbitMQ.prototype, "subscribeToQueue")
+        .callsFake((queue: string, cb: any) => {
+          callbacks.set(queue, cb);
+          return Promise.resolve();
+        });
+
+      const onError = sandbox.stub();
+      const emailHandler: WorkerFunction<EmailJob> = sandbox.stub().resolves();
+      const resizeHandler: WorkerFunction<ResizeJob> = sandbox
+        .stub()
+        .resolves();
+
+      const server = new Server(
+        new Map<string, WorkerFunction<EmailJob>>([["email", emailHandler]]),
+        { onError, maxRetries: 3 },
+      );
+
+      server.setTask<ResizeJob>("resize", {
+        task: resizeHandler,
+        maxRetries: 0,
+        taskTimeoutMs: 2500,
+        validate: (raw: unknown): ResizeJob => {
+          const obj = raw as { width?: unknown };
+          if (typeof obj?.width !== "number" || obj.width <= 0) {
+            throw new Error("width must be positive number");
+          }
+          return { width: obj.width };
+        },
+      });
+
+      await server.start();
+
+      const goodEmailActions: MessageActions = {
+        ack: sandbox.stub(),
+        nack: sandbox.stub(),
+      };
+      callbacks.get("email")!({ to: "dev@example.com" }, {}, goodEmailActions);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      sinon.assert.calledOnce(goodEmailActions.ack as sinon.SinonStub);
+      expect((emailHandler as sinon.SinonStub).firstCall.args[0]).to.deep.equal(
+        { to: "dev@example.com" },
+      );
+
+      const badResizeActions: MessageActions = {
+        ack: sandbox.stub(),
+        nack: sandbox.stub(),
+      };
+      callbacks.get("resize")!({ width: -10 }, {}, badResizeActions);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      sinon.assert.notCalled(resizeHandler as sinon.SinonStub);
+      sinon.assert.calledOnceWithExactly(
+        badResizeActions.nack as sinon.SinonStub,
+        false,
+      );
+      sinon.assert.calledOnce(onError);
+      expect(onError.firstCall.args[0]).to.be.an.instanceof(TaskFatalError);
+
+      const goodResizeActions: MessageActions = {
+        ack: sandbox.stub(),
+        nack: sandbox.stub(),
+      };
+      callbacks.get("resize")!({ width: 800 }, {}, goodResizeActions);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      sinon.assert.calledOnce(goodResizeActions.ack as sinon.SinonStub);
+      expect(
+        (resizeHandler as sinon.SinonStub).firstCall.args[0],
+      ).to.deep.equal({ width: 800 });
     });
   });
 });

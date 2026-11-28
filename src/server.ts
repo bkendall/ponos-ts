@@ -1,3 +1,5 @@
+import { resolveLogger } from "./logger.js";
+import type { Logger } from "./logger.js";
 import { RabbitMQ } from "./rabbitmq.js";
 import type { MessageActions, RabbitMQConnectionConfig } from "./rabbitmq.js";
 import {
@@ -6,15 +8,43 @@ import {
   validateWorkerOptions,
 } from "./worker.js";
 import type {
+  ParseableSchema,
   PonosWorkerOptions,
+  StandardSchemaIssue,
+  StandardSchemaResult,
+  StandardSchemaV1,
+  TaskValidator,
   WorkerContext,
   WorkerData,
   WorkerFunction,
 } from "./worker.js";
 
 export { TaskFatalError };
+export type { Logger };
 export type { MessageActions, RabbitMQConnectionConfig };
-export type { PonosWorkerOptions, WorkerContext, WorkerData, WorkerFunction };
+export type {
+  ParseableSchema,
+  PonosWorkerOptions,
+  StandardSchemaIssue,
+  StandardSchemaResult,
+  StandardSchemaV1,
+  TaskValidator,
+  WorkerContext,
+  WorkerData,
+  WorkerFunction,
+};
+
+export interface TaskDefinition<TData = WorkerData> {
+  task: WorkerFunction<TData>;
+  validate?: TaskValidator<TData>;
+  taskTimeoutMs?: number;
+  maxRetries?: number;
+  initialRetryDelayMs?: number;
+  maxRetryDelayMs?: number;
+}
+
+export type TaskRegistration<TData = WorkerData> =
+  WorkerFunction<TData> | TaskDefinition<TData>;
 
 export interface ServerOptions {
   name?: string;
@@ -26,13 +56,23 @@ export interface ServerOptions {
   initialRetryDelayMs?: number;
   maxRetryDelayMs?: number;
   onError?: (err: Error) => void;
+  logger?: Partial<Logger>;
 }
 
 interface QueuedJob {
-  handler: WorkerFunction;
-  job: WorkerData;
+  definition: TaskDefinition<any>;
+  job: unknown;
   jobMeta: object;
   actions: MessageActions;
+}
+
+function normalizeTaskDefinition<TData>(
+  registration: TaskRegistration<TData>,
+): TaskDefinition<TData> {
+  if (typeof registration === "function") {
+    return { task: registration };
+  }
+  return registration;
 }
 
 export class Server {
@@ -40,16 +80,17 @@ export class Server {
   private activeCounts: Map<string, number> = new Map();
   private concurrency: number;
   private inFlight: Set<Promise<void>> = new Set();
+  private logger: Logger;
   private onError: (err: Error) => void;
   private rabbitmq: RabbitMQ;
   private stopping = false;
   private subscribedQueues: Set<string> = new Set();
-  private tasks: Map<string, WorkerFunction>;
+  private tasks: Map<string, TaskRegistration<any>>;
   private workQueues: Map<string, QueuedJob[]>;
-  private workerOptions: PonosWorkerOptions;
+  private workerOptions: PonosWorkerOptions<any>;
 
   constructor(
-    tasks: Map<string, WorkerFunction> = new Map(),
+    tasks: ReadonlyMap<string, TaskRegistration<any>> = new Map(),
     options: ServerOptions = {},
   ) {
     const concurrency = options.concurrency ?? 1;
@@ -77,22 +118,24 @@ export class Server {
     validateWorkerOptions(this.workerOptions);
 
     this.workQueues = new Map();
-    this.tasks = tasks;
+    this.tasks = new Map();
+    this.logger = resolveLogger(options.logger);
     this.onError =
       options.onError ??
       ((err: Error): void => {
-        console.error("Server error", err);
+        this.logger.error("Server error", err);
       });
     this.rabbitmq = new RabbitMQ({
       name: options.name ?? "ponos",
-      tasks: this.tasks.keys(),
+      tasks: tasks.keys(),
       connection: options.rabbitmq,
       prefetch: options.prefetch ?? this.concurrency,
       onError: this.onError,
+      logger: this.logger,
     });
 
-    for (const [queue, fn] of this.tasks) {
-      this.setTask(queue, fn);
+    for (const [queue, registration] of tasks) {
+      this.setTask(queue, registration);
     }
   }
 
@@ -106,7 +149,7 @@ export class Server {
       await this.rabbitmq.connect();
       await this.consume();
     } catch (err: unknown) {
-      console.error("start error", err);
+      this.logger.error("start error", err);
       throw err;
     }
   }
@@ -130,18 +173,24 @@ export class Server {
 
       await this.rabbitmq.disconnect();
     } catch (err: unknown) {
-      console.error("stop error", err);
+      this.logger.error("stop error", err);
       throw err;
     } finally {
       this.stopping = false;
     }
   }
 
-  setTask(queueName: string, task: WorkerFunction): this {
+  setTask<TData = WorkerData>(
+    queueName: string,
+    registration: TaskRegistration<TData>,
+  ): this {
+    if (typeof registration !== "function") {
+      validateWorkerOptions(registration);
+    }
     if (!this.workQueues.has(queueName)) {
       this.workQueues.set(queueName, []);
     }
-    this.tasks.set(queueName, task);
+    this.tasks.set(queueName, registration);
     this.rabbitmq.registerTask(queueName);
     return this;
   }
@@ -154,16 +203,22 @@ export class Server {
       pendingQueues.map(async (queue: string) => {
         await this.rabbitmq.subscribeToQueue(
           queue,
-          (job: WorkerData, jobMeta: object, actions: MessageActions): void => {
-            const task = this.tasks.get(queue);
-            if (!task) {
+          (job: unknown, jobMeta: object, actions: MessageActions): void => {
+            const registration = this.tasks.get(queue);
+            if (!registration) {
               this.onError(
                 new Error(`No task handler registered for queue "${queue}"`),
               );
               actions.nack(false);
               return;
             }
-            this.enqueue(queue, task, job, jobMeta, actions);
+            this.enqueue(
+              queue,
+              normalizeTaskDefinition(registration),
+              job,
+              jobMeta,
+              actions,
+            );
           },
         );
         this.subscribedQueues.add(queue);
@@ -173,8 +228,8 @@ export class Server {
 
   private enqueue(
     name: string,
-    handler: WorkerFunction,
-    job: WorkerData,
+    registrationOrDef: TaskRegistration<any>,
+    job: unknown,
     jobMeta: object,
     actions: MessageActions,
   ): void {
@@ -188,7 +243,12 @@ export class Server {
       queue = [];
       this.workQueues.set(name, queue);
     }
-    queue.push({ handler, job, jobMeta, actions });
+    queue.push({
+      definition: normalizeTaskDefinition(registrationOrDef),
+      job,
+      jobMeta,
+      actions,
+    });
     this.pumpQueue(name);
   }
 
@@ -208,7 +268,7 @@ export class Server {
 
       const runPromise = this.runWorker(
         name,
-        next.handler,
+        next.definition,
         next.job,
         next.jobMeta,
         next.actions,
@@ -229,14 +289,35 @@ export class Server {
 
   private async runWorker(
     queueName: string,
-    handler: WorkerFunction,
-    job: WorkerData,
+    definition: TaskDefinition<any>,
+    job: unknown,
     jobMeta: object,
     actions: MessageActions,
   ): Promise<void> {
-    const worker = PonosWorker.create(0, job, queueName, handler, {
+    const worker = PonosWorker.create(0, job, queueName, definition.task, {
       ...this.workerOptions,
+      ...(definition.taskTimeoutMs !== undefined
+        ? { taskTimeoutMs: definition.taskTimeoutMs }
+        : {}),
+      ...(definition.maxRetries !== undefined
+        ? { maxRetries: definition.maxRetries }
+        : {}),
+      ...(definition.initialRetryDelayMs !== undefined
+        ? { initialRetryDelayMs: definition.initialRetryDelayMs }
+        : {}),
+      ...(definition.maxRetryDelayMs !== undefined
+        ? { maxRetryDelayMs: definition.maxRetryDelayMs }
+        : {}),
+      ...(definition.validate !== undefined
+        ? { validate: definition.validate }
+        : {}),
       jobMeta: jobMeta as Record<string, unknown>,
+      onRetry: (err: Error, nextAttempt: number, delayMs: number): void => {
+        this.logger.warn(
+          `Retrying task on queue "${queueName}" (attempt ${nextAttempt}) in ${delayMs}ms`,
+          err,
+        );
+      },
     });
     try {
       await worker.run();

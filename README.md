@@ -11,12 +11,12 @@
 
 ## Features
 
-- **Typed Task Handlers**: Full TypeScript support with clean types (`WorkerFunction`, `WorkerData`).
+- **Typed Task Handlers & Payload Validation**: Generic `WorkerFunction<TData>` and `TaskDefinition<TData>` supporting plain validators, Standard Schema v1 (Zod, Valibot, ArkType), and `.parse()` schemas—failing invalid payloads immediately via `TaskFatalError`.
 - **Awaited FIFO Queue Processing**: Jobs run sequentially in FIFO order by default (or up to configured per-queue `concurrency`) with matching RabbitMQ `prefetch`.
 - **Automated Acking & Dead-Letter Nacking**: Handlers automatically acknowledge completed messages and `nack(false)` malformed JSON, exhausted retries, or `TaskFatalError` failures so dead-letter exchanges can capture them.
 - **Bounded Timeout & Exponential Retries**: Configurable task timeout with `AbortSignal` (default `30_000ms`), capped exponential backoff (`maxRetries: 3`), and `TaskFatalError` for non-retryable failures.
 - **Graceful Shutdown**: Unsubscribes consumers, requeues unstarted buffered jobs, awaits in-flight workers so they can settle cleanly, and closes the RabbitMQ connection.
-- **Flexible Configuration**: Programmatic `ServerOptions` (URL or structured `amqp`/`amqps` connection config, `prefetch`, `onError`) and environment-based RabbitMQ setup (`RABBITMQ_URL`, `RABBITMQ_PROTOCOL`, `RABBITMQ_HOSTNAME`, `RABBITMQ_PORT`, `RABBITMQ_USERNAME`, `RABBITMQ_PASSWORD`, `RABBITMQ_VHOST`).
+- **Flexible Configuration & Pluggable Logging**: Programmatic `ServerOptions` (`rabbitmq`, `prefetch`, `concurrency`, retry/timeout settings, `logger`, `onError`) and environment-based RabbitMQ setup (`RABBITMQ_URL`, `RABBITMQ_PROTOCOL`, `RABBITMQ_HOSTNAME`, `RABBITMQ_PORT`, `RABBITMQ_USERNAME`, `RABBITMQ_PASSWORD`, `RABBITMQ_VHOST`).
 
 ---
 
@@ -95,8 +95,8 @@ Ponos automatically reads RabbitMQ connection options from environment variables
 
 The core class responsible for managing tasks and RabbitMQ queue consumption.
 
-#### `constructor(tasks?: Map<string, WorkerFunction>, options?: ServerOptions)`
-Creates a new server instance with an optional queue-to-worker map and configuration options (`name`, `rabbitmq`, `prefetch`, `concurrency`, `taskTimeoutMs`, `maxRetries`, `initialRetryDelayMs`, `maxRetryDelayMs`, `onError`).
+#### `constructor(tasks?: ReadonlyMap<string, TaskRegistration<any>>, options?: ServerOptions)`
+Creates a new server instance with an optional queue-to-task map (`WorkerFunction<TData>` or `TaskDefinition<TData>`) and configuration options (`name`, `rabbitmq`, `prefetch`, `concurrency`, `taskTimeoutMs`, `maxRetries`, `initialRetryDelayMs`, `maxRetryDelayMs`, `logger`, `onError`).
 
 #### `server.start(): Promise<void>`
 Connects to RabbitMQ, applies channel `prefetch`, asserts required queues, subscribes all handlers, and starts consuming messages.
@@ -107,8 +107,8 @@ Subscribes any newly registered tasks and starts consuming messages on them.
 #### `server.stop(): Promise<void>`
 Unsubscribes from active consumer queues, requeues (`nack(true)`) unstarted buffered messages, awaits in-flight workers so they settle cleanly, waits for publisher confirms, and closes the RabbitMQ connection.
 
-#### `server.setTask(queueName: string, task: WorkerFunction): this`
-Dynamically registers or updates a worker function for a specific queue name. When called after `start()`, invoke `await server.consume()` to assert and start consuming the new queue.
+#### `server.setTask<TData = WorkerData>(queueName: string, registration: TaskRegistration<TData>): this`
+Dynamically registers or updates a typed worker function or `TaskDefinition<TData>` (with optional payload validator and per-queue retry/timeout overrides) for a specific queue name. When called after `start()`, invoke `await server.consume()` to assert and start consuming the new queue.
 
 ---
 
@@ -126,6 +126,17 @@ interface ServerOptions {
   initialRetryDelayMs?: number;
   maxRetryDelayMs?: number;
   onError?: (err: Error) => void;
+  logger?: Partial<Logger>;
+}
+```
+
+#### `Logger`
+```typescript
+interface Logger {
+  info(message: string, ...meta: unknown[]): void;
+  warn(message: string, ...meta: unknown[]): void;
+  error(message: string, ...meta: unknown[]): void;
+  debug?(message: string, ...meta: unknown[]): void;
 }
 ```
 
@@ -143,7 +154,7 @@ interface RabbitMQConnectionConfig {
 ```
 
 #### `WorkerData`
-The expected shape of incoming task payloads:
+Default payload shape when no custom generic type parameter is provided:
 ```typescript
 interface WorkerData {
   message: string;
@@ -160,13 +171,31 @@ interface WorkerContext {
 }
 ```
 
-#### `WorkerFunction`
+#### `WorkerFunction<TData = WorkerData>`
 The signature required for task handler functions:
 ```typescript
-type WorkerFunction = (
-  data: WorkerData,
+type WorkerFunction<TData = WorkerData> = (
+  data: TData,
   context: WorkerContext,
 ) => Promise<unknown> | PromiseLike<unknown>;
+```
+
+#### `TaskDefinition<TData = WorkerData>` & `TaskValidator<TData>`
+Register a typed task with runtime validation (plain function, Standard Schema v1 such as Zod/Valibot/ArkType, or `{ parse(raw) }`) and optional per-queue overrides:
+```typescript
+type TaskValidator<TData> =
+  | ((raw: unknown) => TData | Promise<TData>)
+  | StandardSchemaV1<TData>
+  | ParseableSchema<TData>;
+
+interface TaskDefinition<TData = WorkerData> {
+  task: WorkerFunction<TData>;
+  validate?: TaskValidator<TData>;
+  taskTimeoutMs?: number;
+  maxRetries?: number;
+  initialRetryDelayMs?: number;
+  maxRetryDelayMs?: number;
+}
 ```
 
 #### `TaskFatalError`

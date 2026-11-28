@@ -1,7 +1,11 @@
 import sinon from "sinon";
 import { expect } from "chai";
 import { PonosWorker, TaskFatalError } from "../src/worker.js";
-import type { WorkerContext } from "../src/worker.js";
+import type {
+  ParseableSchema,
+  StandardSchemaV1,
+  WorkerContext,
+} from "../src/worker.js";
 
 describe("PonosWorker", () => {
   let sandbox: sinon.SinonSandbox;
@@ -273,6 +277,154 @@ describe("PonosWorker", () => {
       expect(err).to.be.an.instanceof(TaskFatalError);
       sinon.assert.calledOnce(taskHandler);
       sinon.assert.notCalled(onRetry);
+    });
+  });
+
+  describe("payload validation", () => {
+    it("should transform and pass validated payload from a function validator", async () => {
+      interface ParsedJob {
+        count: number;
+      }
+      const taskHandler = sandbox.stub().resolves();
+      const worker = PonosWorker.create<ParsedJob>(
+        0,
+        { count: "42" },
+        "typedQueue",
+        taskHandler,
+        {
+          validate: (raw: unknown): ParsedJob => {
+            const obj = raw as { count?: string };
+            return { count: Number(obj.count) };
+          },
+        },
+      );
+
+      await worker.run();
+
+      sinon.assert.calledOnce(taskHandler);
+      expect(taskHandler.firstCall.args[0]).to.deep.equal({ count: 42 });
+    });
+
+    it("should wrap function validator errors in TaskFatalError with zero retries", async () => {
+      const rootErr = new Error("missing field");
+      const taskHandler = sandbox.stub().resolves();
+      const onRetry = sandbox.stub();
+      const worker = PonosWorker.create<{ id: string }>(
+        0,
+        {},
+        "typedQueue",
+        taskHandler,
+        {
+          maxRetries: 3,
+          onRetry,
+          validate: () => {
+            throw rootErr;
+          },
+        },
+      );
+
+      const err = await worker.run().catch((e: unknown) => e);
+      expect(err).to.be.an.instanceof(TaskFatalError);
+      expect((err as Error).message).to.include("missing field");
+      expect((err as Error & { cause?: unknown }).cause).to.equal(rootErr);
+      sinon.assert.notCalled(taskHandler);
+      sinon.assert.notCalled(onRetry);
+    });
+
+    it("should rethrow TaskFatalError thrown by validator unchanged", async () => {
+      const fatal = new TaskFatalError("explicit fatal");
+      const taskHandler = sandbox.stub().resolves();
+      const worker = PonosWorker.create(0, {}, "typedQueue", taskHandler, {
+        validate: () => {
+          throw fatal;
+        },
+      });
+
+      const err = await worker.run().catch((e: unknown) => e);
+      expect(err).to.equal(fatal);
+      sinon.assert.notCalled(taskHandler);
+    });
+
+    it("should support StandardSchemaV1 validators on success and failure", async () => {
+      interface EmailJob {
+        to: string;
+      }
+      const schema: StandardSchemaV1<EmailJob> = {
+        "~standard": {
+          version: 1,
+          vendor: "test",
+          validate: async (raw: unknown) => {
+            const obj = raw as { to?: unknown };
+            if (typeof obj?.to === "string" && obj.to.includes("@")) {
+              return { value: { to: obj.to.trim() } };
+            }
+            return { issues: [{ message: "Invalid email" }] };
+          },
+        },
+      };
+
+      const taskHandler = sandbox.stub().resolves();
+      const okWorker = PonosWorker.create<EmailJob>(
+        0,
+        { to: " a@b.com " },
+        "email",
+        taskHandler,
+        { validate: schema },
+      );
+      await okWorker.run();
+      expect(taskHandler.firstCall.args[0]).to.deep.equal({ to: "a@b.com" });
+
+      const onRetry = sandbox.stub();
+      const badWorker = PonosWorker.create<EmailJob>(
+        0,
+        { to: "bad" },
+        "email",
+        taskHandler,
+        { validate: schema, maxRetries: 2, onRetry },
+      );
+      const err = await badWorker.run().catch((e: unknown) => e);
+      expect(err).to.be.an.instanceof(TaskFatalError);
+      expect((err as Error).message).to.include("Invalid email");
+      sinon.assert.calledOnce(taskHandler);
+      sinon.assert.notCalled(onRetry);
+    });
+
+    it("should support ParseableSchema ({ parse }) validators on success and failure", async () => {
+      interface InvoiceJob {
+        total: number;
+      }
+      const schema: ParseableSchema<InvoiceJob> = {
+        parse(raw: unknown): InvoiceJob {
+          const obj = raw as { total?: unknown };
+          if (typeof obj?.total !== "number") {
+            throw new Error("total must be a number");
+          }
+          return { total: obj.total };
+        },
+      };
+
+      const taskHandler = sandbox.stub().resolves();
+      const okWorker = PonosWorker.create<InvoiceJob>(
+        0,
+        { total: 99 },
+        "invoice",
+        taskHandler,
+        { validate: schema },
+      );
+      await okWorker.run();
+      expect(taskHandler.firstCall.args[0]).to.deep.equal({ total: 99 });
+
+      const badWorker = PonosWorker.create<InvoiceJob>(
+        0,
+        { total: "nope" },
+        "invoice",
+        taskHandler,
+        { validate: schema, maxRetries: 2 },
+      );
+      const err = await badWorker.run().catch((e: unknown) => e);
+      expect(err).to.be.an.instanceof(TaskFatalError);
+      expect((err as Error).message).to.include("total must be a number");
+      sinon.assert.calledOnce(taskHandler);
     });
   });
 });

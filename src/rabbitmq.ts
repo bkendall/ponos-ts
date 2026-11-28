@@ -1,4 +1,6 @@
 import amqp from "amqplib";
+import { resolveLogger } from "./logger.js";
+import type { Logger } from "./logger.js";
 
 export interface MessageActions {
   ack: () => void;
@@ -27,6 +29,7 @@ export interface RabbitMQOpts {
   connection?: string | RabbitMQConnectionConfig;
   prefetch?: number;
   onError?: (err: Error) => void;
+  logger?: Partial<Logger>;
 }
 
 function toError(err: unknown): Error {
@@ -119,6 +122,7 @@ export class RabbitMQ {
   private connectTarget: string | amqp.Options.Connect;
   private connection?: amqp.ChannelModel;
   private consuming: Map<string, string> = new Map();
+  private logger: Logger;
   private name: string;
   private onError: (err: Error) => void;
   private prefetchCount: number;
@@ -139,10 +143,11 @@ export class RabbitMQ {
     }
     this.prefetchCount = prefetch;
     this.connectTarget = resolveConnectTarget(opts.connection);
+    this.logger = resolveLogger(opts.logger);
     this.onError =
       opts.onError ??
       ((err: Error): void => {
-        console.error("RabbitMQ error", err);
+        this.logger.error("RabbitMQ error", err);
       });
 
     this.setCleanState();
@@ -191,7 +196,7 @@ export class RabbitMQ {
         }
       }
       this.setCleanState();
-      console.error("connect error", err);
+      this.logger.error("connect error", err);
       throw err;
     }
   }
@@ -205,7 +210,7 @@ export class RabbitMQ {
     }
     for (const [queue, handler] of subscriptions) {
       if (this.consuming.has(queue)) {
-        console.log(`already consuming queue ${queue}`);
+        this.logger.info(`already consuming queue ${queue}`);
         continue;
       }
       await this.assertQueue(queue);

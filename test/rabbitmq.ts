@@ -539,4 +539,67 @@ describe("RabbitMQ", () => {
       );
     });
   });
+
+  describe("logger", () => {
+    it("should route info and error logs through a custom logger without touching console", async () => {
+      const consoleLogStub = sandbox.stub(console, "log");
+      const consoleErrorStub = sandbox.stub(console, "error");
+      const logger = {
+        info: sandbox.stub(),
+        warn: sandbox.stub(),
+        error: sandbox.stub(),
+        debug: sandbox.stub(),
+      };
+
+      const rmq = new RabbitMQ({ name: "test", logger });
+      await rmq.connect();
+
+      await rmq.subscribeToQueue("q1", sandbox.stub());
+      await rmq.consume();
+      await rmq.subscribeToQueue("q1", sandbox.stub());
+      await rmq.consume();
+
+      sinon.assert.calledWithExactly(
+        logger.info,
+        "already consuming queue test.q1",
+      );
+
+      const channelErr = new Error("chan error");
+      fakeChannel.emit("error", channelErr);
+      sinon.assert.calledWithExactly(
+        logger.error,
+        "RabbitMQ error",
+        channelErr,
+      );
+
+      (amqp.connect as sinon.SinonStub).rejects(new Error("connect failed"));
+      await expect(rmq.connect()).to.be.rejectedWith("connect failed");
+      sinon.assert.calledWith(logger.error, "connect error");
+
+      sinon.assert.notCalled(consoleLogStub);
+      sinon.assert.notCalled(consoleErrorStub);
+    });
+
+    it("should fall back to defaultLogger for omitted partial logger methods", async () => {
+      const consoleLogStub = sandbox.stub(console, "log");
+      const customError = sandbox.stub();
+      const rmq = new RabbitMQ({
+        name: "test",
+        logger: { error: customError },
+      });
+      await rmq.connect();
+
+      await rmq.subscribeToQueue("q1", sandbox.stub());
+      await rmq.consume();
+      await rmq.subscribeToQueue("q1", sandbox.stub());
+      await rmq.consume();
+
+      sinon.assert.calledWithExactly(
+        consoleLogStub,
+        "already consuming queue test.q1",
+      );
+      fakeChannel.emit("error", new Error("boom"));
+      sinon.assert.calledOnce(customError);
+    });
+  });
 });
