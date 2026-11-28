@@ -8,16 +8,45 @@ export interface WorkerContext {
   jobMeta?: Record<string, unknown>;
 }
 
-export type WorkerFunction = (
-  data: WorkerData,
+export interface StandardSchemaIssue {
+  readonly message: string;
+  readonly path?: ReadonlyArray<PropertyKey | { readonly key: PropertyKey }>;
+}
+
+export type StandardSchemaResult<TOutput> =
+  | { readonly value: TOutput; readonly issues?: undefined }
+  | { readonly issues: ReadonlyArray<StandardSchemaIssue> };
+
+export interface StandardSchemaV1<TOutput = unknown> {
+  readonly "~standard": {
+    readonly version: 1;
+    readonly vendor: string;
+    readonly validate: (
+      value: unknown,
+    ) => StandardSchemaResult<TOutput> | Promise<StandardSchemaResult<TOutput>>;
+  };
+}
+
+export interface ParseableSchema<TOutput> {
+  parse(value: unknown): TOutput | Promise<TOutput>;
+}
+
+export type TaskValidator<TData> =
+  | ((raw: unknown) => TData | Promise<TData>)
+  | StandardSchemaV1<TData>
+  | ParseableSchema<TData>;
+
+export type WorkerFunction<TData = WorkerData> = (
+  data: TData,
   context: WorkerContext,
 ) => Promise<unknown> | PromiseLike<unknown>;
 
-export interface PonosWorkerOptions {
+export interface PonosWorkerOptions<TData = WorkerData> {
   taskTimeoutMs?: number;
   maxRetries?: number;
   initialRetryDelayMs?: number;
   maxRetryDelayMs?: number;
+  validate?: TaskValidator<TData>;
   jobMeta?: Record<string, unknown>;
   onRetry?: (err: Error, nextAttempt: number, delayMs: number) => void;
 }
@@ -52,7 +81,9 @@ function assertNonNegativeInteger(value: number, label: string): void {
   }
 }
 
-export function validateWorkerOptions(options: PonosWorkerOptions): void {
+export function validateWorkerOptions<TData>(
+  options: PonosWorkerOptions<TData>,
+): void {
   if (options.taskTimeoutMs !== undefined) {
     assertNonNegativeFinite(options.taskTimeoutMs, "taskTimeoutMs");
   }
@@ -71,12 +102,22 @@ function toError(err: unknown): Error {
   return err instanceof Error ? err : new Error(String(err));
 }
 
-export class PonosWorker {
+function isStandardSchema<TData>(
+  validator: TaskValidator<TData>,
+): validator is StandardSchemaV1<TData> {
+  return (
+    typeof validator === "object" &&
+    validator !== null &&
+    "~standard" in validator
+  );
+}
+
+export class PonosWorker<TData = WorkerData> {
   attempt: number;
-  job: WorkerData;
+  job: TData;
   msTimeout: number;
   queue: string;
-  task: WorkerFunction;
+  task: WorkerFunction<TData>;
 
   private initialAttempt: number;
   private initialRetryDelayMs: number;
@@ -84,20 +125,23 @@ export class PonosWorker {
   private maxRetries: number;
   private maxRetryDelayMs: number;
   private onRetry?: (err: Error, nextAttempt: number, delayMs: number) => void;
+  private rawJob: unknown;
+  private validate?: TaskValidator<TData>;
 
   constructor(
     attempt: number,
-    job: WorkerData,
+    job: TData | unknown,
     queue: string,
-    task: WorkerFunction,
-    options: PonosWorkerOptions = {},
+    task: WorkerFunction<TData>,
+    options: PonosWorkerOptions<TData> = {},
   ) {
     assertNonNegativeInteger(attempt, "attempt");
     validateWorkerOptions(options);
 
     this.initialAttempt = attempt;
     this.attempt = attempt;
-    this.job = job;
+    this.rawJob = job;
+    this.job = job as TData;
     this.queue = queue;
     this.task = task;
 
@@ -107,21 +151,26 @@ export class PonosWorker {
       options.initialRetryDelayMs ?? DEFAULT_INITIAL_RETRY_DELAY_MS;
     this.maxRetryDelayMs =
       options.maxRetryDelayMs ?? DEFAULT_MAX_RETRY_DELAY_MS;
+    this.validate = options.validate;
     this.jobMeta = options.jobMeta;
     this.onRetry = options.onRetry;
   }
 
-  static create(
+  static create<TData = WorkerData>(
     attempt: number,
-    job: WorkerData,
+    job: TData | unknown,
     queue: string,
-    task: WorkerFunction,
-    options: PonosWorkerOptions = {},
-  ): PonosWorker {
+    task: WorkerFunction<TData>,
+    options: PonosWorkerOptions<TData> = {},
+  ): PonosWorker<TData> {
     return new PonosWorker(attempt, job, queue, task, options);
   }
 
   async run(): Promise<void> {
+    if (this.validate) {
+      this.job = await this.validatePayload(this.rawJob, this.validate);
+    }
+
     for (
       let attempt = this.initialAttempt;
       attempt <= this.maxRetries;
@@ -146,6 +195,38 @@ export class PonosWorker {
         this.onRetry?.(normalizedErr, attempt + 1, delayMs);
         await this.sleep(delayMs);
       }
+    }
+  }
+
+  private async validatePayload(
+    raw: unknown,
+    validator: TaskValidator<TData>,
+  ): Promise<TData> {
+    try {
+      if (typeof validator === "function") {
+        return await validator(raw);
+      }
+      if (isStandardSchema(validator)) {
+        const result = await validator["~standard"].validate(raw);
+        if (result.issues) {
+          const summary = result.issues
+            .map((issue) => issue.message)
+            .join("; ");
+          throw new TaskFatalError(
+            `Job validation failed on queue "${this.queue}": ${summary}`,
+          );
+        }
+        return result.value;
+      }
+      return await validator.parse(raw);
+    } catch (err: unknown) {
+      if (err instanceof TaskFatalError) {
+        throw err;
+      }
+      throw new TaskFatalError(
+        `Job validation failed on queue "${this.queue}": ${toError(err).message}`,
+        { cause: err },
+      );
     }
   }
 
