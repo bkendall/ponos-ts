@@ -8,10 +8,14 @@ import type { MessageActions } from "../src/rabbitmq.js";
 import { PonosWorker } from "../src/worker.js";
 import type { WorkerData } from "../src/worker.js";
 
-function createDeferred<T = void>() {
-  let resolve!: (value: T | PromiseLike<T>) => void;
+function createDeferred(): {
+  promise: Promise<void>;
+  resolve: () => void;
+  reject: (reason?: unknown) => void;
+} {
+  let resolve!: () => void;
   let reject!: (reason?: unknown) => void;
-  const promise = new Promise<T>((res, rej) => {
+  const promise = new Promise<void>((res, rej) => {
     resolve = res;
     reject = rej;
   });
@@ -637,10 +641,7 @@ describe("Server", () => {
         "ponos.dynamic",
       );
       sinon.assert.calledTwice(fakeChannel.consume);
-      sinon.assert.calledWith(
-        fakeChannel.consume.secondCall,
-        "ponos.dynamic",
-      );
+      sinon.assert.calledWith(fakeChannel.consume.secondCall, "ponos.dynamic");
     });
   });
 });

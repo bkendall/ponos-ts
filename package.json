@@ -3,8 +3,16 @@
   "version": "1.0.1",
   "description": "Typescript port of Ponos",
   "repository": "https://github.com/bkendall/ponos-ts",
-  "main": "lib/index.js",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
   "type": "module",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
   "engines": {
     "node": ">=22.0.0"
   },
@@ -13,13 +21,14 @@
     "build:watch": "tsc --watch",
     "clean": "rm -rf lib",
     "coverage": "c8 mocha 'test/**/*.ts'",
-    "lint": "eslint src",
+    "lint": "eslint src test test-functional example resources",
     "prepare": "npm run build",
-    "test": "npm run lint && npm run build && npm run test:mocha",
+    "test": "npm run lint && npm run typecheck && npm run build && npm run test:mocha",
     "test:coverage": "npm run coverage",
-    "test:mocha": "mocha 'test/**/*.ts'",
     "test:functional": "mocha 'test-functional/**/*.ts'",
-    "test:watch": "mocha -w --watch-extensions ts 'test/**/*.ts'"
+    "test:mocha": "mocha 'test/**/*.ts'",
+    "test:watch": "mocha -w --watch-extensions ts 'test/**/*.ts'",
+    "typecheck": "tsc -p tsconfig.check.json"
   },
   "c8": {
     "all": true,
@@ -59,8 +68,6 @@
     "mocha": "^12.0.0",
     "prettier": "^3.4.2",
     "sinon": "^22.1.0",
-    "source-map-support": "^0.5.21",
-    "ts-node": "^10.9.2",
     "tsx": "^4.19.2",
     "typescript": "^6.0.0"
   },

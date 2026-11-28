@@ -19,17 +19,25 @@ server
     console.log("server started");
   })
   .catch((err: unknown) => {
-    console.error(`server error: ${err}`);
+    console.error("server error:", err);
+    process.exit(1);
   });
 
-process.on("SIGINT", () => {
-  server
-    .stop()
-    .then(() => {
-      console.log("server stopped");
-    })
-    .catch((err: unknown) => {
-      console.error(`server stop error: ${err}`);
-    });
+const shutdown = async (): Promise<void> => {
+  try {
+    await server.stop();
+    console.log("server stopped");
+    process.exit(0);
+  } catch (err: unknown) {
+    console.error("server stop error:", err);
+    process.exit(1);
+  }
+};
+
+process.once("SIGINT", () => {
+  void shutdown();
 });
 
+process.once("SIGTERM", () => {
+  void shutdown();
+});

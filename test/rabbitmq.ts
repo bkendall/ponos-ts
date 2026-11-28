@@ -335,11 +335,13 @@ describe("RabbitMQ", () => {
       const rmq = new RabbitMQ({ name: "test", tasks: new Set() });
       await rmq.connect();
 
-      let consumerCallback: Function | null = null;
-      fakeChannel.consume.callsFake((_queue: string, cb: Function) => {
-        consumerCallback = cb;
-        return Promise.resolve({ consumerTag: "tag-1" });
-      });
+      let consumerCallback: ((msg: any) => void) | null = null;
+      fakeChannel.consume.callsFake(
+        (_queue: string, cb: (msg: any) => void) => {
+          consumerCallback = cb;
+          return Promise.resolve({ consumerTag: "tag-1" });
+        },
+      );
 
       const handler = sandbox.stub().callsFake((_job, _jobMeta, actions) => {
         actions.ack();
@@ -371,11 +373,13 @@ describe("RabbitMQ", () => {
       const rmq = new RabbitMQ({ name: "test", tasks: new Set() });
       await rmq.connect();
 
-      let consumerCallback: Function | null = null;
-      fakeChannel.consume.callsFake((_queue: string, cb: Function) => {
-        consumerCallback = cb;
-        return Promise.resolve({ consumerTag: "tag-1" });
-      });
+      let consumerCallback: ((msg: any) => void) | null = null;
+      fakeChannel.consume.callsFake(
+        (_queue: string, cb: (msg: any) => void) => {
+          consumerCallback = cb;
+          return Promise.resolve({ consumerTag: "tag-1" });
+        },
+      );
 
       const handler = sandbox.stub().callsFake((_job, _jobMeta, actions) => {
         actions.nack(true);
@@ -405,11 +409,13 @@ describe("RabbitMQ", () => {
       const rmq = new RabbitMQ({ name: "test", tasks: new Set() });
       await rmq.connect();
 
-      let consumerCallback: Function | null = null;
-      fakeChannel.consume.callsFake((_queue: string, cb: Function) => {
-        consumerCallback = cb;
-        return Promise.resolve({ consumerTag: "tag-1" });
-      });
+      let consumerCallback: ((msg: any) => void) | null = null;
+      fakeChannel.consume.callsFake(
+        (_queue: string, cb: (msg: any) => void) => {
+          consumerCallback = cb;
+          return Promise.resolve({ consumerTag: "tag-1" });
+        },
+      );
 
       await rmq.subscribeToQueue("my-queue", sandbox.stub());
       await rmq.consume();
@@ -424,11 +430,13 @@ describe("RabbitMQ", () => {
       const rmq = new RabbitMQ({ name: "test", tasks: new Set(), onError });
       await rmq.connect();
 
-      let consumerCallback: Function | null = null;
-      fakeChannel.consume.callsFake((_queue: string, cb: Function) => {
-        consumerCallback = cb;
-        return Promise.resolve({ consumerTag: "tag-1" });
-      });
+      let consumerCallback: ((msg: any) => void) | null = null;
+      fakeChannel.consume.callsFake(
+        (_queue: string, cb: (msg: any) => void) => {
+          consumerCallback = cb;
+          return Promise.resolve({ consumerTag: "tag-1" });
+        },
+      );
 
       await rmq.subscribeToQueue("my-queue", sandbox.stub());
       await rmq.consume();
